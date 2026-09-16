@@ -71,7 +71,7 @@ function Shot($name) {
   $r = New-Object MK+RECT
   [MK]::GetWindowRect($script:win, [ref]$r) | Out-Null
   $w = $r.Right-$r.Left; $h2 = $r.Bottom-$r.Top
-  $f = "$WS\soku_d3d9glide\$name.png"
+  $f = "$WS\soku-d3d9-softrast\$name.png"
   $bmp = New-Object System.Drawing.Bitmap $w, $h2
   $g = [System.Drawing.Graphics]::FromImage($bmp)
   $g.CopyFromScreen($r.Left, $r.Top, 0, 0, (New-Object System.Drawing.Size $w, $h2))

@@ -1,3 +1,4 @@
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $ErrorActionPreference = "Continue"
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -26,7 +27,7 @@ $SWP_NOMOVE  = 0x0002
 $SWP_NOSIZE  = 0x0001
 
 $d = "D:\th123"
-$out = "E:\OpenClaw\.openclaw\workspace\soku_d3d9glide\cpu_run.png"
+$out = "$RepoRoot\cpu_run.png"
 Remove-Item $out -Force -ErrorAction SilentlyContinue
 
 Get-Process -Name "th123*" -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }

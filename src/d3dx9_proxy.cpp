@@ -1,13 +1,13 @@
 /*
- * d3dx9_proxy.cpp —— d3dx9_33.dll 代理 (只包 4 个函数)
+ * d3dx9_proxy.cpp —— d3dx9_33.dll代理
  *
  * 为什么要它:
  *   th123.exe 导入表实测只用 4 个 d3dx9 函数 ——
  *     D3DXCreateTexture   ← 纹理正门
- *     D3DXCreateEffect    ← 着色器效果 (对应之前看到的 CreatePixelShader 调用)
- *     D3DXVec2Hermite / D3DXVec2Normalize  (纯数学, 不关心)
- *   但 device->CreateTexture 一次都没被调 -> 纹理在 D3DX 内部就断了。
- *   架这层网把入参和返回码记下来, 一次问死"断在哪"。
+ *     D3DXCreateEffect    ← 着色器效果 (对应 CreatePixelShader 调用)
+ *     D3DXVec2Hermite / D3DXVec2Normalize
+ *   但 device->CreateTexture
+ *   架这层网把入参和返回码记下来, 一次看到断在哪。
  *
  * 不用 .def 转发: MSVC 不支持 "名 = 其它dll.名" 那种跨模块转发,
  * 而且我们只需要 4 个, 直接手写转发更省事。

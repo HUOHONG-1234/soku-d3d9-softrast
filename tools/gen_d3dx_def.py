@@ -8,7 +8,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 
 VC = r'D:\微软大战代码\VC\Tools\MSVC\14.50.35717\bin\Hostx86\x86\dumpbin.exe'
 REAL = r'C:\Windows\SysWOW64\d3dx9_33.dll'
-OUTDEF = r'E:\OpenClaw\.openclaw\workspace\soku_d3d9glide\src\d3dx9.def'
+OUTDEF = r'$RepoRoot\src\d3dx9.def'
 
 # 要自己实现（记账）的导出 —— 其余全部转发
 # 只收 D3DXCreateTexture: 签名已从 mingw-w64 + wine 两份头文件交叉验证。

@@ -1,9 +1,6 @@
 /*
  * d3d9out.h —— CPU 光栅的 D3D9 输出端
  *
- * 操作员指定: "实现CPU加速 只让GPU做到一个输出的作用"
- *             "你应该在DX9上面搞"   (不要把结果塞进 Glide 那层笼子)
- *
  * 设计:
  *   1. 载入【真正的】系统 d3d9 (绝对路径, 避免 LoadLibrary("d3d9.dll")
  *      返回我们自己的模块句柄 —— dll 代理的经典陷阱)
@@ -13,7 +10,6 @@
  *            -> UpdateSurface 到 backbuffer -> Present
  *   5. 游戏自己的绘制调用全被 shim 截住走 CPU 光栅, 真设备只干"贴图+翻页"
  *
- * 好处: 32 位色、无 Glide 16bpp/dithering 斜纹、纹理尺寸不再受 Voodoo2 限制。
  */
 #ifndef D3D9OUT_H
 #define D3D9OUT_H
@@ -129,7 +125,7 @@ static int O_CreateDevice(UINT Adapter, D3DDEVTYPE Type, HWND hwnd,
                                  &pp2, &O_dev);
     }
     if (FAILED(hr) || !O_dev) {
-        LogF("[out] [!] 真设备彻底失败 hr=0x%08X -> 回退 Glide 路径", (unsigned)hr);
+        LogF("[out] [!] device creation failed hr=0x%08X", (unsigned)hr);
         O_failed = 1;
         return 0;
     }
@@ -152,7 +148,7 @@ static int O_CreateDevice(UINT Adapter, D3DDEVTYPE Type, HWND hwnd,
 }
 
 /* 把 src（w*h ARGB8888）打包并推上屏。返回 1 = 成功。
-   src 可为空 -> 用当前 SR_buf（帧延迟环开启时会传环里的旧帧）。 */
+   src may be NULL to use the current SR_buf. */
 static int O_PresentSrc(const unsigned int *src, int w, int h)
 {
     D3DLOCKED_RECT lr;
@@ -234,10 +230,10 @@ static int O_PresentSrc(const unsigned int *src, int w, int h)
 
 static int O_Present(void) { return O_PresentSrc(NULL, SR_w, SR_h); }
 
-/* 重建输出端 —— D3D9 切全屏/改分辨率【只能走 Reset】。
+/* 重建输出端。
    之前它是空桩(返回 S_OK 但什么都不做) -> 游戏以为切了, 实际还在窗口里。
-   操作员实测“开不了全屏”。
-   正确做法: 把真设备的 Reset 转发出去, 然后按新尺寸/格式重建离屏面。 */
+   操开不了全屏。
+   解决方案是把真设备的 Reset 转发出去, 然后按新尺寸/格式重建离屏面。 */
 static int O_Reset(D3DPRESENT_PARAMETERS *pp)
 {
     HRESULT hr;

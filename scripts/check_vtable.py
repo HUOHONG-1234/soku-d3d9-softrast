@@ -35,7 +35,7 @@ spec, s0, e0 = iface_methods('IDirect3DDevice9')
 print('d3d9.h IDirect3DDevice9: %d 方法 (L%d..L%d)' % (len(spec), s0, e0))
 print('  前 6: ' + ' '.join(spec[:6]))
 
-stub = open(r'E:\OpenClaw\.openclaw\workspace\soku_d3d9glide\src\stubs_device9.h',
+stub = open(r'$RepoRoot\src\stubs_device9.h',
             'r', encoding='utf-8', errors='replace').read()
 stubm = re.findall(r'STDMETHODCALLTYPE\s+([A-Za-z_]\w*)\s*\(', stub)
 print('stubs_device9.h: %d 方法' % len(stubm))

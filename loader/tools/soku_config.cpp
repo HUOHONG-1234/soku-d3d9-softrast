@@ -36,7 +36,7 @@ static int     g_backend = 1;   /* 索引到 kBackends[] */
 static HWND g_listModules = NULL;
 static HWND g_listPatches = NULL;
 static HWND g_lblStatus   = NULL;
-static HWND g_radBackend[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+static HWND g_radBackend[5] = { NULL, NULL, NULL, NULL, NULL };
 /* 需要参与布局的控件（窗口缩放时要重新摆位）*/
 static HWND g_lblMods = NULL, g_lblPats = NULL, g_lblBackend = NULL;
 static HWND g_btnDeploy = NULL, g_btnRecall = NULL;
@@ -64,11 +64,10 @@ static const char *kPatchLabels[] = {
 };
 static const int kPatchCount = 10;
 
-/* ---------------- 渲染后端零件清单 ----------------
-   每个后端的 dll/conf 都住在 backends\<dir>\, 只有被选中的那一套
-   才复制到游戏根目录跟 exe 做邻居 —— 避免多套 d3d9 类 dll 互相打架。
-   注: glide 那套的 shim 本身就是 d3d9 代理, 所以 ChainDll 指向它,
-       不会和加载器占用的根目录 d3d9.dll 冲突。 */
+/* ---------------- backend file manifest ----------------
+   Each backend's DLLs/conf live under backends\<dir>\; only the selected
+   set is copied next to the game executable, so multiple d3d9-class DLLs
+   never conflict in the root directory. */
 
 struct BFile { const char *src; const char *dst; };
 struct BackendDef {
@@ -91,24 +90,19 @@ static const BackendDef kBackends[] = {
     { "dgvoodoo2", "dgVoodoo2 (D3D11)", "dgvoodoo_d3d9.dll", "0", 2, {
         { "dgvoodoo_d3d9.dll", "dgvoodoo_d3d9.dll" },
         { "dgVoodoo.conf",     "dgVoodoo.conf" } } },
-    { "glide", "Glide (D3D9->Glide)", "glide_shim.dll", "0", 3, {
-        { "glide_shim.dll", "glide_shim.dll" },
-        { "glide3x.dll",    "glide3x.dll" },
-        { "glide2x.dll",    "glide2x.dll" } } },
     /* 【实验性】CPU 软光栅。已知问题(2026-09-16):
        1. 未抠干净黑底的素材仍会露黑边 (灵乌路空等)
        2. 不支持全屏模式
        3. 帧率: 轻场景 60 / 重场景 35
        性能本身没问题(光栅 2.08ms/帧, 6线程); 是渲染正确性未收敛。 */
-    { "cpu", "[实验] CPU 渲染 (软光栅)", "cpu_d3d9.dll", "0", 4, {
+    { "cpu", "[exp] CPU rasterizer", "cpu_d3d9.dll", "0", 3, {
         { "cpu_d3d9.dll",  "cpu_d3d9.dll" },
         { "d3dx9_33.dll",  "d3dx9_33.dll" },
-        { "d3dx9_real.dll","d3dx9_real.dll" },
-        { "glide3x.dll",   "glide3x.dll" } } },
+        { "d3dx9_real.dll","d3dx9_real.dll" } } },
 };
-/* 表长度必须与 kBackendCount 一致 ——
-   之前加 CPU 时【替换】了 glide 而不是追加, 导致 kBackends[5] 越界,
-   点「CPU 渲染」直接闪退 (已由 test_gui2.py 复现)。 */
+/* Table length is derived, never hardcoded.
+   A previous version kept a stale constant after adding a backend, which
+   made kBackends[n] read out of bounds and crashed on selection. */
 static const int kBackendCount = sizeof(kBackends) / sizeof(kBackends[0]);
 
 /* ---------------- 工具 ---------------- */
@@ -300,8 +294,7 @@ static void SyncFromList(HWND lv, std::vector<Item> &items)
 #define IDC_RB_DXVK   1012
 #define IDC_RB_ON12   1013
 #define IDC_RB_DGV    1014
-#define IDC_RB_GLIDE  1015
-#define IDC_RB_CPU    1016
+#define IDC_RB_CPU    1015
 #define IDC_DEPLOY    1017
 #define IDC_RECALL    1018
 
@@ -348,9 +341,8 @@ static void LayoutChildren(HWND h)
     MoveWindow(g_radBackend[0], margin,        y,      110, 22, TRUE);
     MoveWindow(g_radBackend[1], margin + 112,  y,      130, 22, TRUE);
     MoveWindow(g_radBackend[2], margin + 244,  y,      145, 22, TRUE);
-    MoveWindow(g_radBackend[3], margin,        y + 24, 155, 22, TRUE);
-    MoveWindow(g_radBackend[4], margin + 157,  y + 24, 175, 22, TRUE);
-    MoveWindow(g_radBackend[5], margin + 334,  y + 24, 180, 22, TRUE);
+    MoveWindow(g_radBackend[3], margin,        y + 24, 185, 22, TRUE);
+    MoveWindow(g_radBackend[4], margin + 187,  y + 24, 180, 22, TRUE);
 
     MoveWindow(g_btnDeploy, W - margin - 100, y,      100, 26, TRUE);
     MoveWindow(g_btnRecall, W - margin - 100, y + 28, 100, 26, TRUE);
@@ -400,12 +392,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 254, 468, 145, 22, h, (HMENU)IDC_RB_ON12, NULL, NULL);
         HWND rb4 = CreateWindowW(L"BUTTON", L"dgVoodoo2 (D3D11)",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 401, 468, 155, 22, h, (HMENU)IDC_RB_DGV, NULL, NULL);
-        HWND rb5 = CreateWindowW(L"BUTTON", L"Glide (D3D9->Glide)",
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 558, 468, 165, 22, h, (HMENU)IDC_RB_GLIDE, NULL, NULL);
         HWND rb6 = CreateWindowW(L"BUTTON", L"[实验] CPU 渲染 (软光栅)",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 10, 492, 175, 22, h, (HMENU)IDC_RB_CPU, NULL, NULL);
         g_radBackend[0] = rb1; g_radBackend[1] = rb2; g_radBackend[2] = rb3;
-        g_radBackend[3] = rb4; g_radBackend[4] = rb5; g_radBackend[5] = rb6;
+        g_radBackend[3] = rb4; g_radBackend[4] = rb6;
 
         HWND d1 = CreateWindowW(L"BUTTON", L"部署后端",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 728, 466, 90, 26, h, (HMENU)IDC_DEPLOY, NULL, NULL);
@@ -427,7 +417,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         g_lblStatus = st;
         g_btnSave = s1; g_btnAllOn = s2; g_btnAllOff = s3; g_btnReload = s4;
 
-        HWND all[] = { lm, lpl, a, b, lb, rb1, rb2, rb3, rb4, rb5, rb6, d1, d2, s1, s2, s3, s4, st };
+        HWND all[] = { lm, lpl, a, b, lb, rb1, rb2, rb3, rb4, rb6, d1, d2, s1, s2, s3, s4, st };
         for (int ai = 0; ai < (int)(sizeof(all) / sizeof(all[0])); ai++)
             SendMessageW(all[ai], WM_SETFONT, (WPARAM)font, TRUE);
 
@@ -450,8 +440,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_RB_DXVK:   g_backend = 1; SetStatus("渲染后端 -> %S", kBackends[1].label); break;
         case IDC_RB_ON12:   g_backend = 2; SetStatus("渲染后端 -> %S", kBackends[2].label); break;
         case IDC_RB_DGV:    g_backend = 3; SetStatus("渲染后端 -> %S", kBackends[3].label); break;
-        case IDC_RB_GLIDE:  g_backend = 4; SetStatus("渲染后端 -> %S", kBackends[4].label); break;
-        case IDC_RB_CPU:    g_backend = 5; SetStatus("渲染后端 -> %S", kBackends[5].label); break;
+        case IDC_RB_CPU:    g_backend = 4; SetStatus("渲染后端 -> %S", kBackends[4].label); break;
         case IDC_DEPLOY: {
             char msg[256] = "";
             SaveBackend();

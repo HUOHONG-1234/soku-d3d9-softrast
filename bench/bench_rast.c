@@ -1,9 +1,11 @@
-/* bench_rast.c -- 光栅器独立压测台 (含多线程对比)
+/* bench_rast.c -- standalone rasterizer benchmark, with multi-thread scaling
  *
- * 为什么需要: 优化必须能立刻量化, 不能每次去开操作员的游戏。
- * 场景 A 最贴近真实负载 (带纹理 + alpha 混合 + MODULATE, 角色/特效走这条)。
+ * Purpose: measure rasterizer throughput without launching the game.
+ * Scene A (textured + alpha blend + MODULATE) is the closest match to real
+ * gameplay load: characters and effects take that path.
  *
- * 走【批处理路径】而非立即模式 —— 因为多线程只在批处理下生效。
+ * Uses the batched path rather than immediate mode, because the
+ * multi-threaded rasterizer only applies to batching.
  */
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_WARNINGS

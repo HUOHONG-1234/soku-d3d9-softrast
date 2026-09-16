@@ -1,10 +1,9 @@
 /*
  * softrast.h -- CPU 软光栅核心（定点 + 行带并行 + SSE2）
  *
- * 设计目标（操作员指定）:
- *   "实现CPU加速 只让GPU做到一个输出的作用"
- *   "效率太低 优化好了上个AVX或者SSE吧"
- *   "先跑到性能过剩再谈消除浪费"
+ * Design goals:
+ *   - all shading and blending on the CPU; the GPU only displays the result
+ *   - scanline rasterization with fixed-point interpolation and SSE2
  *
  * 【性能设计】
  *   1. 跨行扫描线: 每行解析求 [xa, xb)，不再逐像素试边函数
@@ -34,11 +33,6 @@
 static unsigned int *SR_buf = NULL;
 static int           SR_w = 0, SR_h = 0;
 
-/* 【外部托管】帧延迟环接管帧缓冲时必须置 1。
-   否则 SR_Reset 会把环缓冲 free 掉又重新 malloc，延迟就断了。
-   必须声明在 SR_Reset 之前。 */
-static int SR_bufExternal = 0;
-
 /* SSE2 填充 n 个像素 */
 static void SR_Fill32(unsigned int *dst, unsigned int col, int n)
 {
@@ -53,10 +47,7 @@ static int SR_Reset(int w, int h)
 {
     if (w <= 0 || h <= 0) return 0;
     if (SR_buf && SR_w == w && SR_h == h) return 1;
-    /* 【外部托管】帧延迟环形缓冲接管时必须跳过 ——
-       否则这里会把环缓冲 free 掉、又重新 malloc 一张, 延迟就断了。 */
-    if (SR_bufExternal) return 1;
-    if (SR_buf) { free(SR_buf); SR_buf = NULL; }
+        if (SR_buf) { free(SR_buf); SR_buf = NULL; }
     SR_buf = (unsigned int *)malloc((size_t)w * h * 4);
     if (!SR_buf) return 0;
     SR_w = w; SR_h = h;
@@ -64,25 +55,15 @@ static int SR_Reset(int w, int h)
     return 1;
 }
 
-/* 把帧缓冲指向外部内存（帧延迟环用）。
-   调用方负责这块内存的生死。 */
-static void SR_SetBuffer(unsigned int *buf, int w, int h)
-{
-    SR_buf = buf; SR_w = w; SR_h = h;
-    SR_bufExternal = 1;
-}
-static void SR_ClearExternal(void) { SR_bufExternal = 0; }
-
 static void SR_Clear(unsigned int argb)
 {
     if (!SR_buf) return;
     SR_Fill32(SR_buf, argb, SR_w * SR_h);
 }
 
-/* 只清一个矩形 —— D3D9 的 Clear 支持 Count>0 + pRects，
-   只清指定区域。游戏常靠它做局部重绘。
-   【之前忽略 pRects 直接整屏清 -> 把早先画好的东西全抹掉，
-     实测症状: 对手变空气、只剩片段。】 */
+/* Clear only a rectangle.  D3D9 Clear supports Count>0 with pRects to clear
+   a sub-region, which the game uses for partial redraws.  Ignoring pRects
+   and clearing the whole target erases previously drawn content. */
 static void SR_ClearRect(int x1, int y1, int x2, int y2, unsigned int argb)
 {
     int y;
@@ -104,11 +85,13 @@ typedef struct {
 } SR_Tex;
 
 /* 【纹理生命周期】
-   帧级批处理下, 命令入队到 Flush 之间隔着一段时间。
-   若纹理在此期间被 Release 并回收 (px 释放, valid=0), Flush 时就会全退回顶点色。
-   实测症状: 纹理未就绪命中 1245 万次, 正常采样 0 次 -> 贴图全白, 立绘蒸发。
-   **保证留存的责任在调用方** (shim 侧用 TexHold/TexReleaseHeld 做帧级保活)。
-   本文件不做引用计数 —— 在队列里逐个 AddRef 会造成释放路径不对称。 */
+/* Frame batching means commands are queued well before Flush.  If a texture
+   is released during that window its pixel buffer is freed and 'valid' is
+   cleared, so Flush falls back to vertex colour for the whole sprite.
+   The caller is responsible for keeping textures alive (shim uses
+   TexHold/TexReleaseHeld for frame-level retention); this file does no
+   reference counting, because per-command AddRef would make release
+   asymmetric. */
 
 /* ---------------- 渲染状态 ---------------- */
 typedef struct {
@@ -216,13 +199,11 @@ static long long g_spanPix = 0;
 static long long g_texNoBlend = 0;   /* 有纹理但混合关闭的像素数 */
 static long long g_texNoAlpha = 0;   /* 纹理 alpha 全不透明的像素数 */
 
-/* 每线程统计（并行时避免争用） */
+/* Per-thread statistics (kept separate to avoid contention). */
 typedef struct {
     long long spans, spanPix, white, valid;
-    long long texNoBlend;   /* 【诊断】有纹理但 ALPHABLENDENABLE=FALSE
-                               这一项会让精灵的透明区变成黑边、
-                               白字透明底变成纯白块 —— 与操作员症状完全对应 */
-    long long texNoAlpha;   /* 【诊断】纹理 alpha 全不透明 (素材本身没抠干净) */
+    long long texNoBlend;   /* textured draws with alpha blending disabled */
+    long long texNoAlpha;   /* texture alpha channel fully opaque (source art) */
 } SR_Stats;
 
 #define SR_NO_TEXTURE  0x00000000u
@@ -573,11 +554,13 @@ static SR_Tri   SR_tris[SR_MAX_CMD];
 static int      SR_nThreads = 0;        /* 实际工作线程数（不含主线程） */
 static int      SR_nBands   = 0;
 static int      SR_bandH    = 0;
-/* 【同步设计 —— 踩过坑, 别改回手动重置】
-   错误做法: 共用一个手动重置事件。事件在整个帧内保持 signaled,
-             工作线程做完自己的趟数后会立即再次通过 Wait, 空转并对 busy 重复递减
-             -> busy 提前归零 -> 主线程提前放行 -> 数据竞态甚至挂死。
-   正确做法: 每线程一个【自动重置】事件, 一帧一次唤醒, 做完就回去等。 */
+/* Thread synchronization note.
+   Incorrect approach: a single manually-reset event.  It stays signalled for
+   the whole frame, so workers pass WaitForSingleObject again immediately and
+   decrement the busy counter repeatedly, causing it to reach zero early and
+   the main thread to proceed while work is still running.
+   Correct approach: one auto-reset event per worker, signalled once per
+   frame; each worker waits again after finishing. */
 static HANDLE   SR_hWake[SR_MAX_THREADS];
 static HANDLE   SR_hThread[SR_MAX_THREADS];
 static HANDLE   SR_hDone    = NULL;

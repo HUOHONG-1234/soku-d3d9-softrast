@@ -1,10 +1,15 @@
-/* test_rast.cpp -- 光栅核心的覆盖率单元测试
+/* test_rast.cpp -- coverage unit tests for the rasterizer core
  *
- * 动机: 操作员反馈"对手变成空气"。假设之一是【镜像/反向绕序的三角形画不出来】
- *       (对手朝反方向, 精灵被水平镜像 -> 绕序相反)。
- *       这里用已知几何直接量覆盖率, 不靠猜日志。
+ * Motivation: mirrored sprites (opponent facing the other way) were not
+ * being drawn at all.  The cause was triangle winding: a horizontally
+ * flipped sprite reverses the vertex order, and the rasterizer only
+ * accepted one winding.
  *
- * 编译: cl /I src test_rast.cpp
+ * These tests feed known geometry and measure coverage, so winding and
+ * pixel-centre rounding regressions are caught immediately rather than by
+ * visual inspection.
+ *
+ * Build: cl /I src test_rast.cpp
  */
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_WARNINGS

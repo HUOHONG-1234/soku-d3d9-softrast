@@ -46,7 +46,7 @@ Write-Host "=== C) write ini (ChainDll=cpu_d3d9.dll) ==="
 $ini = "[soku_loader]`r`nVerbose=1`r`nForceLoad=0`r`nDiscoverModules=1`r`nLoadEngine=0`r`nLoadModules=0`r`nChainDll=cpu_d3d9.dll`r`nUseOn12=0`r`n"
 [System.IO.File]::WriteAllText("$d\soku_loader.ini", $ini, [System.Text.Encoding]::ASCII)
 
-Remove-Item "$d\shim_glide.log","$d\shim_calls.log","$d\shim_stats.log","$d\d3dx_log.txt","$d\crash_modules.txt","$d\soku_loader.log" -Force -ErrorAction SilentlyContinue
+Remove-Item "$d\shim_cpu.log","$d\shim_calls.log","$d\shim_stats.log","$d\d3dx_log.txt","$d\crash_modules.txt","$d\soku_loader.log" -Force -ErrorAction SilentlyContinue
 
 Write-Host "=== D) launch ==="
 $p = Start-Process -FilePath "$d\th123.exe" -WorkingDirectory $d -PassThru
@@ -114,7 +114,7 @@ if (-not $p.HasExited) {
   $r = New-Object RZ+RECT
   [RZ]::GetWindowRect($script:win, [ref]$r) | Out-Null
   $w = $r.Right-$r.Left; $h2 = $r.Bottom-$r.Top
-  $out = "$WS\soku_d3d9glide\match_cpu.png"
+  $out = "$WS\soku-d3d9-softrast\match_cpu.png"
   $bmp = New-Object System.Drawing.Bitmap $w, $h2
   $g = [System.Drawing.Graphics]::FromImage($bmp)
   $g.CopyFromScreen($r.Left, $r.Top, 0, 0, (New-Object System.Drawing.Size $w, $h2))

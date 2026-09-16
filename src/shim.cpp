@@ -1,9 +1,10 @@
 /*
- * shim.cpp —— D3D9 -> Glide 翻译层 (最小可用)
+ * shim.cpp -- D3D9 device shim backed by a CPU software rasterizer.
  *
- * 链路: th123 -> [本 DLL] -> Glide3x (dgVoodoo2) -> D3D11 -> GPU
+ * Pipeline:  th123.exe -> [this DLL] -> CPU rasterizer -> bitmap
+ *            -> real D3D9 device -> GPU (display only)
  *
- * 【vtable 铁律】COM 接口的虚表槽位 = 方法声明顺序。
+ *   COM 接口的虚表槽位 = 方法声明顺序。
  *   所以类体里只能按 d3d9.h 的声明顺序摆方法, 一个都不能挪。
  *   特殊实现全部做成自由函数 (H9_/HD_/HS_/HF_ 前缀), 由生成器产出的
  *   方法体以正确顺序转发过去 —— 手写方法插在 #include 之前会让整张表错位。
@@ -17,7 +18,7 @@
 #include <stdarg.h>
 #include <string.h>
 
-/* CPU 软光栅核心 (操作员指定: CPU 算全部, GPU 只输出) */
+/* CPU 软光栅核心*/
 #include "softrast.h"
 
 /* ================= 日志 ================= */
@@ -25,7 +26,7 @@ static FILE *g_log = NULL;
 static FILE *g_callLog = NULL;
 static int   g_callCount = 0;
 
-static void LogF(const char *fmt, ...);   /* 前置声明: RingInit 等早期函数要用 */
+static void LogF(const char *fmt, ...);
 
 /* 纹理绑定统计（必须放在最前，DumpStatsToFile 要用） */
 static int   g_nullTex = 0;
@@ -54,67 +55,6 @@ static long long g_snapClear = 0;
 static long long g_snapLock = 0, g_snapBlit = 0, g_snapSwap = 0;
 static long long g_snapFrames = 0;
 static long long g_snapQpc = 0;
-
-/* ================= 帧延迟环「梦想延迟」 =================
-   把渲染结果攒进一个环形缓冲，输出 N 帧【之前】的那一张。
-   640x480 ARGB8888 = 1.17 MB/帧
-     600 帧 =  10 秒 @60fps = 703 MB
-     N 用 ini 的 FrameDelay 指定（单位：帧）。
-
-   【硬约束】th123.exe 是 32 位且未设 LAA -> 地址空间 2 GB。
-   实测 2GB / 1.17MB ≈ 1747 帧（即 29 秒）是上限，再大会分配失败。
-   分配失败就自动关掉，不影响正常游玩。
-
-   【为什么不用 memcpy】把 SR_buf 直接指向当前环槽，光栅写进去就是写环，
-   省掉每帧 1.17MB 的拷贝。 */
-static unsigned int *g_ring    = NULL;
-static int           g_ringN   = 0;      /* 环长度（帧） */
-static int           g_ringIdx = 0;      /* 当前写入槽 */
-static int           g_ringFill = 0;     /* 已写入帧数（<N 时输出最新帧） */
-
-/* 【槽位数 = N+1，不是 N】
-   经典 off-by-one: 存 N 帧的环，第 k 帧占 slot[k%N]，
-   而第 k 帧刚画完就在 slot[k%N] —— 恰好把第 k-N 帧压掉了。
-   要同时持有 k-N..k 共 N+1 帧，必须开 N+1 个槽。
-   （我第一版写成 (idx - N + 2N) % N，化简后 == idx，实际延迟 0 帧。） */
-static unsigned int *RingSlot(int i)
-{
-    int m = g_ringN + 1;
-    int k = ((i % m) + m) % m;
-    return g_ring + (size_t)k * (size_t)SR_w * (size_t)SR_h;
-}
-
-static void RingFree(void)
-{
-    if (g_ring) { free(g_ring); g_ring = NULL; }
-    g_ringN = 0; g_ringIdx = 0; g_ringFill = 0;
-    SR_ClearExternal();
-}
-
-/* frames<=0 关掉。返回 1 = 启用成功。 */
-static int RingInit(int frames, int w, int h)
-{
-    size_t slots, bytes;
-    if (frames <= 0 || w <= 0 || h <= 0) { RingFree(); return 0; }
-    RingFree();
-    slots = (size_t)frames + 1u;                  /* N+1 槽 */
-    bytes = slots * (size_t)w * (size_t)h * 4u;
-    g_ring = (unsigned int *)malloc(bytes);
-    if (!g_ring) {
-        LogF("[delay] 分配失败: %d 帧 = %.0f MB（32 位地址空间不够？）",
-             frames, (double)bytes / 1048576.0);
-        RingFree();
-        return 0;
-    }
-    memset(g_ring, 0, bytes);
-    g_ringN = frames;
-    g_ringIdx = 0;
-    g_ringFill = 0;
-    SR_SetBuffer(RingSlot(0), w, h);
-    LogF("[delay] *** 帧延迟已启用: %d 帧 = %.2f 秒 @60fps, 占用 %.0f MB (%d 槽) ***",
-         frames, (double)frames / 60.0, (double)bytes / 1048576.0, frames + 1);
-    return 1;
-}
 
 /* ---- 帧间隔直方图: 判定 vsync 是否在量化帧率 ----
    若被 vsync 卡住, 间隔会聚在 16.7ms / 33.3ms 两个尖峰;
@@ -216,9 +156,10 @@ static void DumpStubSummary(void)
         LogF("  %-40s x%d", g_stubName[i], g_stubCount[i]);
 }
 
-/* 独立统计出口: 不受 MAX_CALL_TRACE 截断影响。
-   之前的教训: 从 shim_calls.log 里数条目 -> 撞 4000 行上限 ->
-   误以为 CreateTexture 没被调用。计数器才是真相。 */
+/* Standalone statistics dump, unaffected by the MAX_CALL_TRACE cap.
+   Counting from shim_calls.log is unreliable: the file is capped at 4000
+   lines, which previously made CreateTexture appear never to be called.
+   The counters below are authoritative. */
 static void BlendDump(FILE *f);   /* 前置声明: DumpStatsToFile 要用 */
 
 static void DumpStatsToFile(const char *tag)
@@ -360,108 +301,8 @@ static void DumpStatsToFile(const char *tag)
     fclose(f);
 }
 
-/* ================= Glide 绑定 ================= */
-typedef unsigned int FxU32;
-typedef int          FxBool;
-
-typedef void   (__stdcall *PFN_grGlideInit)(void);
-typedef void   (__stdcall *PFN_grSstSelect)(int);
-typedef FxBool (__stdcall *PFN_grSstWinOpen)(HWND, int, int, int, int, int, int);
-typedef void   (__stdcall *PFN_grSstWinClose)(void);
-typedef void   (__stdcall *PFN_grBufferClear)(FxU32, FxU32, FxU32);
-typedef void   (__stdcall *PFN_grBufferSwap)(int);
-typedef void   (__stdcall *PFN_grClipWindow)(FxU32, FxU32, FxU32, FxU32);
-typedef void   (__stdcall *PFN_grDrawTriangle)(const void *, const void *, const void *);
-typedef void   (__stdcall *PFN_grConstantColorValue)(FxU32);
-
-/* ---- LFB (线性帧缓冲) 直写接口: CPU 光栅的输出通路 ---- */
-typedef struct {
-    int     size;
-    void   *lfbPtr;
-    FxU32   strideInBytes;
-    int     writeMode;
-    int     origin;
-} GrLfbInfo_t;
-
-typedef FxBool (__stdcall *PFN_grLfbLock)(FxU32, FxU32, int, int, FxBool, GrLfbInfo_t *);
-typedef FxBool (__stdcall *PFN_grLfbUnlock)(FxU32, FxU32);
-typedef FxBool (__stdcall *PFN_grLfbWriteRegion)(FxU32, FxU32, FxU32, FxU32, FxU32, FxU32, FxBool, int, void *);
-
-typedef void   (__stdcall *PFN_grTexDownloadMipMap)(int, FxU32, FxU32, void *);
-typedef void   (__stdcall *PFN_grTexSource)(int, FxU32, FxU32, void *);
-typedef FxU32  (__stdcall *PFN_grTexMinAddress)(int);
-typedef FxU32  (__stdcall *PFN_grTexMaxAddress)(int);
-
-#define GR_BUFFER_BACKBUFFER   0x1
-#define GR_LFB_WRITE_ONLY      0x01
-#define GR_LFB_READ_ONLY       0x00
-#define GR_LFBWRITEMODE_565    0x0
-#define GR_LFBWRITEMODE_ANY    0xFF
-
-#define GR_RESOLUTION_640x480 0x7
-#define GR_REFRESH_60Hz       0x0
-#define GR_COLORFORMAT_ARGB   0x0
-#define GR_ORIGIN_UPPER_LEFT  0x0
-
-static HMODULE g_glide = NULL;
-static PFN_grGlideInit     G_Init;
-static PFN_grSstSelect     G_Select;
-static PFN_grSstWinOpen    G_WinOpen;
-static PFN_grSstWinClose   G_WinClose;
-static PFN_grBufferClear   G_Clear;
-static PFN_grBufferSwap    G_Swap;
-static PFN_grClipWindow    G_Clip;
-static PFN_grDrawTriangle  G_DrawTri;
-static PFN_grLfbLock       G_LfbLock;
-static PFN_grLfbUnlock     G_LfbUnlock;
-static PFN_grLfbWriteRegion G_LfbWrite;
-
-/* GrVertex (Glide 3.x 经典布局): x,y,oow, r,g,b,a, tmuvrx,tmuvry,tmuvrw
-   颜色是 0-255 的 float; oow = 1/w, 2D 时取 1.0 */
-typedef struct {
-    float x, y, oow;
-    float r, g, b, a;
-    float tu, tv, tw;
-} GrVertex;
-
-static FARPROC GG(const char *plain, const char *deco)
-{
-    FARPROC p = deco ? GetProcAddress(g_glide, deco) : NULL;
-    if (!p) p = GetProcAddress(g_glide, plain);
-    return p;
-}
-
-static int GlideInit(void)
-{
-    if (g_glide) return 1;
-    g_glide = LoadLibraryA("glide3x.dll");
-    if (!g_glide) { LogF("[!] 找不到 glide3x.dll err=%lu", GetLastError()); return 0; }
-
-    /* Glide 是 __stdcall, 导出表里是修饰名 —— 必须用修饰名查 */
-    G_Init    = (PFN_grGlideInit)   GG("grGlideInit",   "_grGlideInit@0");
-    G_Select  = (PFN_grSstSelect)   GG("grSstSelect",   "_grSstSelect@4");
-    G_WinOpen = (PFN_grSstWinOpen)  GG("grSstWinOpen",  "_grSstWinOpen@28");
-    G_WinClose= (PFN_grSstWinClose) GG("grSstWinClose", "_grSstWinClose@4");
-    G_Clear   = (PFN_grBufferClear) GG("grBufferClear", "_grBufferClear@12");
-    G_Swap    = (PFN_grBufferSwap)  GG("grBufferSwap",  "_grBufferSwap@4");
-    G_Clip    = (PFN_grClipWindow)  GG("grClipWindow",  "_grClipWindow@16");
-    G_DrawTri = (PFN_grDrawTriangle)GG("grDrawTriangle","_grDrawTriangle@12");
-    G_LfbLock = (PFN_grLfbLock)      GG("grLfbLock",       "_grLfbLock@24");
-    G_LfbUnlock=(PFN_grLfbUnlock)    GG("grLfbUnlock",     "_grLfbUnlock@8");
-    G_LfbWrite=(PFN_grLfbWriteRegion)GG("grLfbWriteRegion","_grLfbWriteRegion@36");
-    LogF("[i] LFB 通路: lock=%d unlock=%d writeRegion=%d",
-         G_LfbLock != NULL, G_LfbUnlock != NULL, G_LfbWrite != NULL);
-
-    if (!G_Init || !G_WinOpen) { LogF("[!] Glide 关键导出缺失"); return 0; }
-    G_Init();
-    if (G_Select) G_Select(0);
-    LogF("[+] Glide 已初始化");
-    return 1;
-}
-
 /* ================= 全局状态 ================= */
 static HWND  g_hwnd = NULL;
-static int   g_glideOpened = 0;
 static IDirect3DDevice9 *g_devPtr = NULL;
 
 /* IDirect3D9 实例指针。
@@ -470,10 +311,12 @@ static IDirect3DDevice9 *g_devPtr = NULL;
    g_d3d9 本体在文件末尾才定义，所以这里用一个早绑定的指针。 */
 static IDirect3D9 *g_d3d9Ptr = NULL;
 
-/* ================= 显卡身份档位 =================
-   操作员指定: 报一块【真的】DX9 显卡, 让游戏的设备创建永不失败。
-   非想天则导入了 d3dx9_33 —— D3DX 会查显存/能力, 报 0 会让它放弃建纹理。
-   取真卡规格 (非随手编), 保证自洽。 */
+/* ================= GPU identity profiles =================
+   Advertise a plausible DX9-era GPU so that device creation always succeeds.
+   The game imports d3dx9_33; D3DX queries VRAM and capability, and a zero
+   reply makes it skip texture creation entirely.
+   Values are real card specifications so the reported capability set stays
+   self-consistent. */
 typedef struct {
     const char *name;
     DWORD vendorId, deviceId;
@@ -520,9 +363,11 @@ static void GpuSelect(const char *key)
 static UINT HD_GetAvailableTextureMem_Val(void);
 
 /* ================= CPU 侧纹理 ================= */
-/* 操作员方向: CPU 算全部, GPU 只输出。
+/* CPU-side texture.  All shading and sampling happen on the CPU; the
+   GPU receives only the finished frame.
    所以纹理也留在 CPU: 游戏 LockRect 写像素 -> UnlockRect 时转 ARGB8888
-   存进 SR_Tex, SetTexture 时直接交给软光栅采样。不碰 Glide TMU。 */
+   Game writes pixels via LockRect; UnlockRect converts them to ARGB8888
+   in SR_Tex, which the rasterizer samples directly. */
 class ShimTexture9;
 HRESULT HT_GetDevice(IDirect3DDevice9 **pp);
 HRESULT HT_GetLevelDesc(ShimTexture9 *t, UINT Level, D3DSURFACE_DESC *p);
@@ -608,33 +453,35 @@ public:
 static void TexFreeSlot(ShimTexture9 *t)
 {
     if (!t) return;
-    /* 【延迟释放 —— 千万别在这里 free 像素！】
-       Release 到 0 时【不能】立即清数据, 因为游戏很可能仍然【绑着】这张纹理:
-       Core_SetTexture(A) -> Draw -> Clear -> Draw ...
-       游戏在 Clear 之后不会重新 SetTexture (多余), 它的绑定还指向 A。
-       若此时把 A 的像素 free 掉并置 valid=0:
-         - 后续绘制要么全退回顶点色 (白块)
-         - 要么采样到已释放的内存 (垃圾/透明)
-       实测症状: 对手变“空气”、大量元素白块。
-       所以只标记可回收, 真实清理推到槽位被复用时。 */
+    /* Deferred release.  Do NOT free the pixel buffers here.
+       A texture can still be bound when its refcount reaches zero:
+         SetTexture(A) -> Draw -> Clear -> Draw ...
+       The game does not re-issue SetTexture after Clear, so its binding
+       still points at A.  Freeing A's pixels here would cause subsequent
+       draws to either fall back to vertex colour (white blocks) or sample
+       freed memory (garbage / transparent output).
+       Therefore only mark the slot free; the actual free happens when the
+       slot is reused (see Core_CreateTexture). */
     t->inUse = 0;
 }
 
-/* 池子开大一点, 并且靠 inUse 复用槽位。
-   之前是自增游标、Release 不归还 -> 实测 1373 次创建就把 1024 撑爆。 */
+/* Texture slots.  The pool is larger than needed and slots are recycled via
+   the inUse flag; the earlier implementation used a monotonically growing
+   cursor and never returned slots, so 1373 texture creations exhausted a
+   pool of 1024. */
 
-/* ---------- 纹理帧级持有 ----------
-   帧级批处理带来的新问题: 命令入队到 Flush 之间隔了一段时间。
-   而纹理槽位在 Release()->0 时会被 TexFreeSlot 清掉 (px 释放, valid=0)。
-   实测症状: 纹理未就绪命中 1245 万次, 正常采样 0 次 -> 贴图全白, 立绘蒸发。
-   (对象在静态池里不会消失, 但内容被清空, 所以现象是“白”而非“崩”。)
+/* ---------- Frame-level texture retention ----------
+   Frame-level batching defers rasterization to the end of the frame.  A
+   texture can be released (refcount 0) in the meantime: TexFreeSlot would
+   drop its pixel buffer and clear the valid flag, so later draws fall back
+   to vertex colour (white) or sample released memory.
 
-   解法: 帧内被 SetTexture 绑过的纹理全部 AddRef 保活,
-         帧末 (Flush 之后) 统一 Release。
-   比逐命令 AddRef 便宜得多, 也不会出现“不对称释放”。
+   Solution: AddRef every texture bound during the frame and release the
+   whole set after the frame's Flush.  This is cheaper than per-command
+   reference counting and avoids asymmetric release.
 
-   注意必须前置声明: TexHold 用在 SetTexture (L1132),
-   而纹理类定义在后面。所以这里先声明接口, 实现放到纹理类之后。 */
+   Note: these are forward declarations.  TexHold is called from
+   Core_SetTexture while the texture class is defined further below. */
 #define MAX_HELD 2048
 static ShimTexture9 *g_held[MAX_HELD];
 static int           g_heldN = 0;
@@ -972,9 +819,9 @@ HRESULT HT_S_UnlockRect(ShimTexSurf9 *s)
 
 /* ================= Core_* 实现 ================= */
 
-/* CPU 光栅的输出端。
-   优先走真 D3D9 (32 位色, 无 Glide 16bpp/dithering 斜纹);
-   只有真设备建不起来时才退回 Glide LFB。 */
+/* CPU rasterizer output stage.
+   The finished frame goes into a system-memory surface, is blitted to the
+   back buffer, then presented by a real D3D9 device. */
 #include "d3d9out.h"
 
 #include "core_proto.h"
@@ -988,38 +835,14 @@ HRESULT Core_Clear(DWORD Count, CONST D3DRECT *pRects, DWORD Flags,
     QpcScope _perf(&g_ticksClear);
     Trace("Core_Clear");
 
-    /* 输出端选择: 真 D3D9 优先。只有它建不起来才退回 Glide。 */
-    if (!O_ready && !O_failed) {
-        /* 还没建设备 (游戏可能没走 CreateDevice 就 Clear) —— 等 Present 再试 */
-    }
-    if (!O_ready) {
-        if (!GlideInit()) return D3DERR_INVALIDCALL;
-        if (!g_glideOpened) {
-            if (!g_hwnd) { LogF("[i] Clear 时无窗口, 颜色先记下"); return S_OK; }
-            Trace("before_grSstWinOpen");
-            LogF("[i] 尝试 grSstWinOpen(hwnd=%p)...", (void *)g_hwnd);
-            if (G_WinOpen(g_hwnd, GR_RESOLUTION_640x480, GR_REFRESH_60Hz,
-                          GR_COLORFORMAT_ARGB, GR_ORIGIN_UPPER_LEFT, 2, 1)) {
-                g_glideOpened = 1;
-                Trace("after_grSstWinOpen_OK");
-                if (G_Clip) G_Clip(0, 0, 640, 480);
-                LogF("[+] *** Glide 窗口已打开 (游戏窗口 %p) ***", (void *)g_hwnd);
-            } else {
-                LogF("[!] grSstWinOpen 失败");
-                return D3DERR_INVALIDCALL;
-            }
-        }
-    }
-
-    /* 【顺序铁律】Draw 是延迟到帧末才 Flush 的, 但 Clear 必须立即生效。
-       若直接把已入队的绘制堆到帧末, 顺序会变成:
-           游戏想要的  Clear1 -> Draw1 -> Clear2 -> Draw2
-           实际变成    Clear1 -> Clear2 -> [帧末] Draw1 -> Draw2
-       于是 Draw1 被 Clear2 擦掉 —— 实测症状就是
-       “大量元素没贴图/变纯白、UI 段消失”。
-       所以 Clear 之前先把队列清完, 保证指令顺序不变。
-       【要点】Flush 必须在 SR_Reset 之前 —— 否则缓冲区可能被重分配,
-       而已入队的命令还引用着旧尺寸。 */
+    /* Sequence is significant.  Draw calls are deferred to end of frame,
+       but Clear must take effect immediately, so the queue is flushed first.
+       Otherwise the order becomes:
+           intended:  Clear1 -> Draw1 -> Clear2 -> Draw2
+           actual  :  Clear1 -> Clear2 -> [end of frame] Draw1 -> Draw2
+       and Draw1 is erased by Clear2.
+       Flush must happen before SR_Reset, otherwise the queued commands still
+       reference the previous buffer size. */
     {
         QpcScope _raster(&g_ticksDraw);
         SR_Flush();
@@ -1160,57 +983,13 @@ HRESULT Core_Present(CONST RECT *, CONST RECT *, HWND, CONST RGNDATA *)
             g_frameDrawN++;
             g_drawAtPresent = g_ticksDraw;
         }
-        /* 【梦想延迟】输出环里 N 帧之前的那一张，然后把指针推进到下一槽。
-           未填满时输出当前帧（否则开局会看到一屏黑）。 */
-        if (g_ring && g_ringN > 0) {
-            int outIdx = (g_ringIdx - g_ringN + g_ringN * 2) % g_ringN;
-            if (g_ringFill < g_ringN) outIdx = g_ringIdx;   /* 还没攒够 -> 输出最新 */
-            O_PresentSrc(RingSlot(outIdx), (int)O_w, (int)O_h);
-            g_ringIdx = (g_ringIdx + 1) % g_ringN;
-            if (g_ringFill < g_ringN) g_ringFill++;
-            /* 下一帧画到新槽里 —— 这样光栅直接写环，省掉每帧 1.17MB 拷贝 */
-            SR_SetBuffer(RingSlot(g_ringIdx), (int)O_w, (int)O_h);
-        } else {
-            O_Present();
-        }
+        O_Present();
         g_frameCount++;
         if (g_frameCount % 200 == 0) DumpFrameBmp("D:\\th123\\sr_dump.bmp");
         if (g_frameCount % 120 == 0) DumpStatsToFile("运行中");
         return S_OK;
     }
 
-    /* 回退: 塞进 Glide LFB (16bpp, 仅供对比) */
-    if (!g_glideOpened) return S_OK;
-
-    if (SR_buf && SR_w > 0 && SR_h > 0) {
-        static unsigned short *out = NULL;
-        static int outN = 0;
-        int i, n = SR_w * SR_h;
-        if (outN < n) {
-            if (out) free(out);
-            out = (unsigned short *)malloc((size_t)n * 2);
-            outN = out ? n : 0;
-        }
-        if (out) {
-            for (i = 0; i < n; i++) {
-                unsigned int c = SR_buf[i];
-                out[i] = (unsigned short)((((c >> 16) & 0xF8) << 8)
-                                        | (((c >> 8)  & 0xFC) << 3)
-                                        | (( c        & 0xF8) >> 3));
-            }
-            if (G_LfbWrite) {
-                G_LfbWrite(GR_BUFFER_BACKBUFFER, 0, 0, 0x00 /*565*/,
-                           SR_w, SR_h, 0, SR_w * 2, out);
-            }
-        }
-    }
-
-    if (G_Swap) {
-        G_Swap(1);
-        g_frameCount++;
-        if (g_frameCount % 60 == 0) LogF("[i] 已呈现 %d 帧 (CPU 光栅 -> Glide)", g_frameCount);
-        if (g_frameCount % 120 == 0) DumpStatsToFile("运行中");
-    }
     return S_OK;
 }
 
@@ -1229,7 +1008,7 @@ HRESULT Core_DrawPrimitiveUP(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount
              (int)PrimitiveType, PrimitiveCount, Stride);
         logged = 1;
     }
-    if ((!O_ready && !g_glideOpened) || !SR_buf) return S_OK;
+    if (!O_ready || !SR_buf) return S_OK;
 
     /* 顶点格式解码: 只认 stride>=20 的 XYZRHW+DIFFUSE(+TEX1)
        XYZRHW: 已是屏幕坐标, 无需矩阵变换 —— 2D 游戏的便宜处
@@ -1294,7 +1073,7 @@ HRESULT Core_SetRenderState(D3DRENDERSTATETYPE State, DWORD Value)
 HRESULT Core_GetRenderState(D3DRENDERSTATETYPE, DWORD *v) { if (v) *v = 0; return S_OK; }
 HRESULT Core_SetTransform(D3DTRANSFORMSTATETYPE, CONST D3DMATRIX *) { Trace("Core_SetTransform"); return S_OK; }
 HRESULT Core_SetViewport(CONST D3DVIEWPORT9 *v)
-{ Trace("Core_SetViewport"); if (v && G_Clip && g_glideOpened) G_Clip(0, 0, v->Width, v->Height); return S_OK; }
+{ (void)v; Trace("Core_SetViewport"); return S_OK; }
 
 HRESULT Core_CreateTexture(UINT W, UINT H, UINT Levels, DWORD Usage,
                            D3DFORMAT Format, D3DPOOL Pool,
@@ -1325,9 +1104,10 @@ HRESULT Core_CreateTexture(UINT W, UINT H, UINT Levels, DWORD Usage,
     if (t->bits)  { free(t->bits);  t->bits  = NULL; }
     if (t->sr.px) { free(t->sr.px); t->sr.px = NULL; }
 
-    /* 【千万别 memset 整个对象！】
-       对象首 4 字节是 vptr。memset 会把虚表指针一起清零，
-       之后任何虚调用都跳空指针 -> 0xC0000005。 */
+    /* Never memset the whole object:
+       the first 4 bytes hold the vtable pointer.  Zeroing it makes any
+       subsequent virtual call jump through a null pointer (0xC0000005).
+       Reset only the data members. */
     t->inUse  = 1;
     t->ref    = 1;
     t->w      = W;
@@ -1428,7 +1208,8 @@ HRESULT Core_SetStreamSource(UINT, IDirect3DVertexBuffer9 *, UINT, UINT) { LogSt
 HRESULT Core_SetIndices(IDirect3DIndexBuffer9 *) { LogStub("SetIndices"); return S_OK; }
 
 /* ================= 最小 Surface / SwapChain ================= */
-/* Glide 没有"表面"概念, 但这些对象必须给真的 —— 游戏不检查失败码。 */
+/* Minimal surface / swap-chain objects.  The game does not check failure
+   codes, so these must be real objects (never NULL). */
 
 /* 前置声明: H*_ 实现在下面, 类体里要用到 */
 HRESULT HF_GetDevice(IDirect3DDevice9 **pp);
@@ -1611,7 +1392,7 @@ HRESULT HD_GetFrontBufferData(UINT, IDirect3DSurface9 *) { return D3DERR_INVALID
 
 /* ---- Reset: 切全屏 / 改分辨率的【唯一】通路 ----
    之前是空桩 (返回 S_OK 但什么都不做) -> 游戏以为切了, 实际还在窗口里,
-   操作员实测「开不了全屏」。
+   A stub here means the game believes it switched but nothing happens.
    这里转发给真设备, 并按新尺寸重建离屏面 (否则尺寸不匹配会画错)。 */
 HRESULT HD_Reset(D3DPRESENT_PARAMETERS *pp)
 {
@@ -1844,7 +1625,7 @@ public:
             }
         }
 
-        /* 先试真 D3D9 输出端 —— 成功就不碰 Glide */
+        /* Create the real D3D9 output device. */
         if (O_CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPP)) {
             SR_Reset((int)O_w, (int)O_h);
             /* 启用多线程光栅 (核数-1 个工作线程, 主线程也参与分行带)
@@ -1852,35 +1633,14 @@ public:
             SR_SetThreads(SR_TotalThreads());
             LogF("[gpu] 光栅线程数 = %d (+主线程)", SR_nThreads);
 
-            /* 【梦想延迟】FrameDelay=<帧数> 开启。0/未设 = 关闭。
-               600 帧 ≈ 10 秒 @60fps，占 703 MB。
-               注: th123.exe 是 32 位且未设 LAA -> 地址空间 2GB，
-                   实测上限约 1747 帧(29 秒)，再大会分配失败(自动回退关闭)。 */
-            {
-                char ini[MAX_PATH], val[64] = "";
-                char *q;
-                int frames;
-                GetModuleFileNameA(NULL, ini, MAX_PATH);
-                q = strrchr(ini, '\\'); if (q) q[1] = 0;
-                strcat_s(ini, MAX_PATH, "soku_shim.ini");
-                GetPrivateProfileStringA("soku_shim", "FrameDelay", "0", val, sizeof(val), ini);
-                frames = atoi(val);
-                if (frames > 0) {
-                    if (!RingInit(frames, (int)O_w, (int)O_h))
-                        LogF("[delay] 帧延迟开启失败，按普通模式跑");
-                }
-            }
-
             *ppOut = (IDirect3DDevice9 *)g_devPtr;
             LogF("[+] 已返回 ShimDevice9 (输出端 = 真 D3D9)");
             return S_OK;
         }
 
-        LogF("[i] D3D9 输出端不可用, 回退 Glide");
-        GlideInit();
-        *ppOut = (IDirect3DDevice9 *)g_devPtr;
-        LogF("[+] 已返回 ShimDevice9");
-        return S_OK;
+        LogF("[!] D3D9 output unavailable - device not created");
+        *ppOut = NULL;
+        return D3DERR_NOTAVAILABLE;
     }
 };
 
@@ -1907,8 +1667,7 @@ static ShimD3D9    g_d3d9;
 IDirect3D9 * WINAPI Direct3DCreate9(UINT SDKVersion)
 {
     LogF("[>] Direct3DCreate9(sdk=%u)", SDKVersion);
-    LogF("[i] 转发给 Glide, 不经过系统 d3d9");
-    GlideInit();
+    LogF("[i] shim active; draw calls are rasterized on the CPU");
 
     g_devPtr = &g_device;
     g_d3d9Ptr = &g_d3d9;
@@ -1943,12 +1702,11 @@ BOOL WINAPI DllMain(HMODULE hSelf, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hSelf);
         InstallCrashFilter();
-        g_log = fopen("shim_glide.log", "w");
+        g_log = fopen("shim_cpu.log", "w");
         g_callLog = fopen("shim_calls.log", "w");
-        LogF("[i] shim.cpp 注入 (D3D9 -> Glide)");
+        LogF("[i] shim.cpp loaded (D3D9 -> CPU software rasterizer)");
     } else if (reason == DLL_PROCESS_DETACH) {
         DumpStubSummary();
-        if (g_glideOpened && G_WinClose) G_WinClose();
         LogF("[i] 卸载 (共追踪 %d 次调用)", g_callCount);
         if (g_log) { fclose(g_log); g_log = NULL; }
         if (g_callLog) { fclose(g_callLog); g_callLog = NULL; }

@@ -22,12 +22,12 @@ $TOP = [IntPtr](-1)
 
 $d = "D:\th123"
 $WS = "E:\OpenClaw\.openclaw\workspace"
-$out = "$WS\soku_d3d9glide\fps_check.png"
+$out = "$WS\soku-d3d9-softrast\fps_check.png"
 Remove-Item $out -Force -ErrorAction SilentlyContinue
 
 Get-Process -Name "th123*" -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 2
-Remove-Item "$d\shim_stats.log","$d\shim_glide.log" -Force -ErrorAction SilentlyContinue
+Remove-Item "$d\shim_stats.log","$d\shim_cpu.log" -Force -ErrorAction SilentlyContinue
 
 $t0 = Get-Date
 $p = Start-Process -FilePath "$d\th123.exe" -WorkingDirectory $d -PassThru

@@ -12,7 +12,7 @@
 import re, os
 
 HDR = r"D:\Windows Kits\10\Include\10.0.26100.0\shared\d3d9.h"
-OUT = r"E:\OpenClaw\.openclaw\workspace\soku_d3d9glide\src"
+OUT = r"$RepoRoot\src"
 os.makedirs(OUT, exist_ok=True)
 
 src = open(HDR, encoding="utf-8", errors="ignore").read()
