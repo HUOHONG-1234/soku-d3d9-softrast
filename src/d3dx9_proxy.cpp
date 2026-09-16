@@ -1,20 +1,21 @@
 /*
- * d3dx9_proxy.cpp —— d3dx9_33.dll代理
+ * d3dx9_proxy.cpp -- d3dx9_33.dll proxy
  *
- * 为什么要它:
- *   th123.exe 导入表实测只用 4 个 d3dx9 函数 ——
- *     D3DXCreateTexture   ← 纹理正门
- *     D3DXCreateEffect    ← 着色器效果 (对应 CreatePixelShader 调用)
- *     D3DXVec2Hermite / D3DXVec2Normalize
- *   但 device->CreateTexture
- *   架这层网把入参和返回码记下来, 一次看到断在哪。
+ * Why it exists:
+ *   th123.exe imports exactly four d3dx9 functions:
+ *     D3DXCreateTexture      texture creation
+ *     D3DXCreateEffect       shader effect
+ *     D3DXVec2Hermite / D3DXVec2Normalize   (plain math)
+ *   The real D3DXCreateTexture never reaches device->CreateTexture, so the
+ *   proxy intercepts it and calls the device directly.
  *
- * 不用 .def 转发: MSVC 不支持 "名 = 其它dll.名" 那种跨模块转发,
- * 而且我们只需要 4 个, 直接手写转发更省事。
+ * No .def re-export table: MSVC does not support cross-module forwarding
+ * ("name = otherdll.name"), and only four functions need to be handled.
  *
- * 部署:
- *   d3dx9_33.dll   = 本代理
- *   d3dx9_real.dll = 系统 d3dx9_33.dll 的改名副本
+ * Deployment:
+ *   d3dx9_33.dll  = this proxy (MIT)
+ *   The real D3DX is loaded from the system directory at runtime; it is
+ *   NOT bundled.  Install the DirectX 9.0c runtime if it is missing.
  */
 #define WIN32_LEAN_AND_MEAN
 #define _CRT_SECURE_NO_WARNINGS
@@ -26,7 +27,7 @@
 
 static FILE   *g_log  = NULL;
 static HMODULE g_real = NULL;
-static char    g_dir[MAX_PATH] = "";
+static char    g_dllDir[MAX_PATH] = "";   /* directory containing this DLL */
 static int     g_nTex = 0, g_nFx = 0;
 
 static void LogF(const char *fmt, ...)
@@ -40,21 +41,33 @@ static void LogF(const char *fmt, ...)
     fflush(g_log);
 }
 
-/* 载入真身。故意用【改名副本】+ 绝对路径:
-   LoadLibraryA("d3dx9_33.dll") 会命中我们自己 (dll 代理经典陷阱)。 */
+/* Locate the real D3DX.  Must not be loaded by the name "d3dx9_33.dll":
+   inside the game directory that name resolves to this proxy itself.
+   The system copy (SysWOW64 for a 32-bit process) is used first, so the
+   redistributable need not be shipped alongside this proxy.
+
+   g_dllDir is an optional override directory (d3dx9_real.dll), kept for
+   hosting scenarios where the runtime lives elsewhere. */
 static HMODULE RealMod(void)
 {
     if (g_real) return g_real;
-    if (g_dir[0]) {
+    if (g_dllDir[0]) {
         char p[MAX_PATH];
-        sprintf_s(p, MAX_PATH, "%sd3dx9_real.dll", g_dir);
+        sprintf_s(p, MAX_PATH, "%sd3dx9_real.dll", g_dllDir);
         g_real = LoadLibraryA(p);
-        LogF("[d3dx] 真身 <- %s  (h=%p)", p, (void *)g_real);
+        if (g_real) LogF("[d3dx] real <- %s  (h=%p)", p, (void *)g_real);
     }
     if (!g_real) {
-        g_real = LoadLibraryA("d3dx9_real.dll");
-        LogF("[d3dx] 真身 <- 搜索路径  (h=%p)", (void *)g_real);
+        char sys[MAX_PATH], p[MAX_PATH];
+        if (GetSystemDirectoryA(sys, MAX_PATH)) {
+            sprintf_s(p, MAX_PATH, "%s\\d3dx9_33.dll", sys);
+            g_real = LoadLibraryA(p);
+            LogF("[d3dx] real <- %s  (h=%p)", p, (void *)g_real);
+        }
     }
+    if (!g_real)
+        LogF("[d3dx] [!] d3dx9_33.dll not found in the system directory. "
+             "Install the DirectX 9.0c runtime.");
     return g_real;
 }
 
@@ -67,10 +80,13 @@ static FARPROC Sym(const char *name)
 }
 
 /* ---- D3DXCreateTexture ----
-   真 D3DXCreateTexture 对所有尺寸都回 D3DERR_INVALIDCALL (实测 640x78/128x128/32x32 全挂),
-   而 device->CreateTexture 一次没被调 —— 说明它卡在自己的前置校验里。
-   那层校验对我们不透明, 且我们的纹理是 CPU 侧的, 根本不需要它。
-   所以: 直接跳过 D3DX 校验, 自己调 device->CreateTexture; 失败再退回真 D3DX。 */
+   The real D3DXCreateTexture returns D3DERR_INVALIDCALL for every size
+   (measured at 640x78, 128x128 and 32x32) without ever reaching
+   device->CreateTexture, so its own validation rejects the request before
+   the device is consulted.  That validation is opaque to us and irrelevant
+   here, since our textures live in CPU memory.
+   So: skip the D3DX validation and call device->CreateTexture directly;
+   fall back to the real D3DX only if that fails. */
 typedef HRESULT (WINAPI *PFN_CreateTexture)(IDirect3DDevice9 *, UINT, UINT, UINT,
                                             DWORD, D3DFORMAT, D3DPOOL,
                                             IDirect3DTexture9 **);
@@ -116,7 +132,7 @@ HRESULT WINAPI D3DXCreateTexture(IDirect3DDevice9 *device, UINT width, UINT heig
         *texture = out;
     }
     if (g_nTex <= 20)
-        LogF("[d3dx] #%d   直连失败, 真 D3DX -> hr=0x%08X tex=%p",
+        LogF("[d3dx] #%d   direct call failed, real D3DX -> hr=0x%08X tex=%p",
              g_nTex, (unsigned)hr, (void *)*texture);
     return hr;
 }
@@ -148,7 +164,6 @@ HRESULT WINAPI D3DXCreateEffect(IDirect3DDevice9 *device, const void *src, UINT 
                           effect ? *effect : NULL);
     return hr;
 }
-
 /* ---- 纯数学, 只转发 ---- */
 typedef void * (WINAPI *PFN_V2Hermite)(void *, const void *, const void *,
                                        const void *, const void *, float);
@@ -175,15 +190,15 @@ BOOL WINAPI DllMain(HMODULE hSelf, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_ATTACH) {
         char *q;
         DisableThreadLibraryCalls(hSelf);
-        GetModuleFileNameA(hSelf, g_dir, MAX_PATH);
-        q = strrchr(g_dir, '\\');
+        GetModuleFileNameA(hSelf, g_dllDir, MAX_PATH);
+        q = strrchr(g_dllDir, '\\');
         if (q) q[1] = 0;
         {
             char p[MAX_PATH];
-            sprintf_s(p, MAX_PATH, "%sd3dx_log.txt", g_dir);
+            sprintf_s(p, MAX_PATH, "%sd3dx_log.txt", g_dllDir);
             g_log = fopen(p, "w");
         }
-        LogF("[d3dx] 代理已加载 (d3dx9_33 -> d3dx9_real)");
+        LogF("[d3dx] proxy loaded (d3dx9_33 -> system D3DX)");
     }
     return TRUE;
 }
