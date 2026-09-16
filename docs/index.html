@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>th123_Softpipe — 架构总览</title>
+<style>
+  /* ============================================================
+     CSS 写在这里。HTML 负责"有什么"，CSS 负责"长什么样"。
+     选择器用标签名 / .类名 / #id —— 见下方各段的用法。
+     ============================================================ */
+  :root {
+    --bg:      #0d1117;
+    --fg:      #c9d1d9;
+    --dim:     #8b949e;
+    --line:    #21262d;
+    --accent:  #58a6ff;
+    --warn:    #d29922;
+    --code-bg: #161b22;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 860px;
+    padding: 2rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.7 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 1.6rem; border-bottom: 1px solid var(--line); padding-bottom: .5rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.2rem; color: var(--accent); }
+  code {
+    background: var(--code-bg);
+    padding: .15em .4em;
+    border-radius: 4px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: .9em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: .85rem;
+    line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; }
+  .note {
+    border-left: 3px solid var(--warn);
+    padding: .6rem 1rem;
+    margin: 1.2rem 0;
+    color: var(--dim);
+    background: #161b2280;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid var(--line); padding: .45rem .7rem; text-align: left; }
+  th { background: var(--code-bg); }
+  .layer {
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: .7rem 1rem;
+    margin: .5rem 0;
+    background: var(--code-bg);
+  }
+  .layer b { color: var(--accent); }
+  .arrow { text-align: center; color: var(--dim); font-size: 1.1rem; margin: .2rem 0; }
+</style>
+</head>
+<body>
+
+<!-- ① 标题：h1 是最高级标题，一个页面只用一次 -->
+<h1>th123_Softpipe</h1>
+
+<p>把 <b>东方非想天则</b>（<code>th123.exe</code>）的 D3D9 绘制调用截下来，
+<strong>用 CPU 软光栅渲染一整帧</strong>，再把成品位图交给真正的 D3D9 显示。</p>
+
+<!-- ② 提示块：自己定义的一个类，配合上面的 .note 样式 -->
+<div class="note">
+实验性项目。性能方向有效，渲染正确性尚未收敛。
+</div>
+
+<h2>管线</h2>
+
+<p>每一层都是一个 <code>&lt;div&gt;</code>，靠 CSS 类 <code>.layer</code> 统一外观。
+箭头用单独的 <code>.arrow</code> 块。</p>
+
+<div class="layer"><b>th123.exe</b> — 32 位进程，D3D9 固定管线，顶点为屏幕坐标</div>
+<div class="arrow">▼</div>
+<div class="layer"><b>d3d9.dll</b> — 加载器：读取 ini，把调用转给后端，可选加载模组</div>
+<div class="arrow">▼</div>
+<div class="layer"><b>cpu_d3d9.dll</b> — 本项目主体：截住绘制调用</div>
+<div class="arrow">▼</div>
+<div class="layer"><b>softrast.h</b> — CPU 软光栅：解码 → 光栅化 → 混合 → 写帧缓冲</div>
+<div class="arrow">▼</div>
+<div class="layer"><b>d3d9out.h</b> — 锁离屏面 → 拷贝 → UpdateSurface → Present</div>
+<div class="arrow">▼</div>
+<div class="layer"><b>真 d3d9</b> — GPU 只负责把成品位图搬上屏</div>
+
+<h2>一次绘制</h2>
+
+<pre><code>DrawPrimitiveUP(type, count, pVtx, stride)
+  ├─ ① 解码顶点（XYZRHW，无需矩阵）
+  ├─ ② 入队 SR_Queue()，记录状态快照
+  ├─ ③ Present → SR_Flush() 整帧并行光栅
+  ├─ ④ LockRect → memcpy → UpdateSurface → Present
+  └─ ⑤ TexReleaseHeld() 释放本帧纹理引用</code></pre>
+
+<h2>关键常量</h2>
+
+<!-- ③ 表格：th 是表头格，td 是数据格。用 thead/tbody 分组是规范做法 -->
+<table>
+  <thead>
+    <tr><th>名称</th><th>值</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>SR_MAX_CMD</code></td><td>16384</td><td>单帧绘制命令上限</td></tr>
+    <tr><td><code>SR_MAX_THREADS</code></td><td>8</td><td>工作线程上限</td></tr>
+    <tr><td><code>MAX_TEX</code></td><td>4096</td><td>纹理池槽位数</td></tr>
+    <tr><td>行带数</td><td>核数 × 4</td><td>下限 4 行/带</td></tr>
+    <tr><td>离屏面格式</td><td><code>D3DFMT_X8R8G8B8</code></td><td>与帧缓冲逐像素对应</td></tr>
+  </tbody>
+</table>
+
+<h2>已知降级路径</h2>
+
+<ul>
+  <li><code>DrawPrimitive</code> / <code>DrawIndexedPrimitive</code> 仍是桩 —— 用顶点缓冲的绘制不会被渲染。</li>
+  <li>着色器为空桩（11 pixel + 3 vertex）。</li>
+  <li><code>SetVertexShader</code> 在对局内出现约 2000 次，尚未查明。</li>
+</ul>
+
+<h2>HTML 骨架说明</h2>
+
+<pre><code>&lt;!DOCTYPE html&gt;              文档类型，必须有
+&lt;html lang="zh-CN"&gt;          根元素，lang 用于朗读与断词
+  &lt;head&gt;                     元数据，不显示
+    &lt;meta charset="UTF-8"&gt;   字符集。缺了这行中文会乱码
+    &lt;title&gt;                 浏览器标签页上的文字
+    &lt;style&gt;                  CSS
+  &lt;/head&gt;
+  &lt;body&gt;                     真正显示的内容
+    &lt;h1&gt;&lt;h2&gt;&lt;h3&gt;           标题层级，别跳级
+    &lt;p&gt;                      段落
+    &lt;ul&gt;&lt;li&gt;                无序列表
+    &lt;pre&gt;&lt;code&gt;             预格式化代码
+    &lt;table&gt;&lt;tr&gt;&lt;td&gt;         表格
+    &lt;a href="..."&gt;          链接
+    &lt;img src="..." alt=".."&gt; 图片，alt 是加载失败时的替代文字
+  &lt;/body&gt;
+&lt;/html&gt;</code></pre>
+
+<div class="note">
+在正文里写字面量 <code>&lt;</code> 必须写成 <code>&amp;lt;</code>，
+否则浏览器会把它当成标签开始。同理 <code>&gt;</code> 写 <code>&amp;gt;</code>，
+<code>&amp;</code> 写 <code>&amp;amp;</code>。
+</div>
+
+</body>
+</html>
