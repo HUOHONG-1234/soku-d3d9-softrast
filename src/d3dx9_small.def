@@ -1,0 +1,6 @@
+LIBRARY d3dx9_33
+EXPORTS
+    D3DXCreateTexture
+    D3DXCreateEffect
+    D3DXVec2Hermite
+    D3DXVec2Normalize

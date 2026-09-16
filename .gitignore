@@ -1,0 +1,25 @@
+# build artifacts — never commit
+*.dll
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# debug output / captures
+*.png
+*.bmp
+*.log
+*.txt
+!requirements.txt
+
+# build dirs
+build/
+out/
+dist/
+.vs/
+
+# python
+__pycache__/
+*.pyc
