@@ -95,7 +95,7 @@ static const BackendDef kBackends[] = {
        2. 不支持全屏模式
        3. 帧率: 轻场景 60 / 重场景 35
        性能本身没问题(光栅 2.08ms/帧, 6线程); 是渲染正确性未收敛。 */
-    { "cpu", "[exp] CPU rasterizer", "cpu_d3d9.dll", "0", 3, {
+    { "cpu", "[实验] CPU 渲染 (软光栅)", "cpu_d3d9.dll", "0", 3, {
         { "cpu_d3d9.dll",  "cpu_d3d9.dll" },
         { "d3dx9_33.dll",  "d3dx9_33.dll" },
         { "d3dx9_real.dll","d3dx9_real.dll" } } },
