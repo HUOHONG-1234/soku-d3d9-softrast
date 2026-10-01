@@ -113,13 +113,27 @@ static void LoadReal(void)
         strncpy_s(dir, MAX_PATH, exe, _TRUNCATE);
         { char *s = strrchr(dir, '\\'); if (s) *s = 0; }
 
-        char cfg[MAX_PATH], chain[64] = "dxvk_d3d9.dll";
+        char cfg[MAX_PATH], chain[64] = "cpu_avx2.dll";
         sprintf_s(cfg, MAX_PATH, "%s\\soku_loader.ini", dir);
-        GetPrivateProfileStringA("soku_loader", "ChainDll", "dxvk_d3d9.dll", chain, sizeof(chain), cfg);
+        GetPrivateProfileStringA("soku_loader", "ChainDll", "cpu_avx2.dll", chain, sizeof(chain), cfg);
 
         if (chain[0]) {
+            /* 查找顺序: 根目录 -> backends\cpu\ -> backends\
+               这样后端可以分开放置 (cpu_sse2.dll / cpu_avx2.dll),
+               用户用管理器选一个写进 ChainDll 即可.
+               若 chain 自带路径 (含 '\'), 只按原样试根目录相对路径. */
+            int hasSlash = (strchr(chain, '\\') != NULL);
             sprintf_s(path, MAX_PATH, "%s\\%s", dir, chain);
             g_real = LoadLibraryA(path);
+            if (!g_real && !hasSlash) {
+                static const char *sub[] = { "backends\\cpu\\", "backends\\" };
+                int si;
+                for (si = 0; si < (int)(sizeof(sub) / sizeof(sub[0])); si++) {
+                    sprintf_s(path, MAX_PATH, "%s\\%s%s", dir, sub[si], chain);
+                    g_real = LoadLibraryA(path);
+                    if (g_real) break;
+                }
+            }
             if (g_real) {
                 p_Create9 = (PFN_Create9)GetProcAddress(g_real, "Direct3DCreate9");
                 p_Create9On12 = (PFN_Create9On12)GetProcAddress(g_real, "Direct3DCreate9On12");
@@ -127,7 +141,8 @@ static void LoadReal(void)
                 LogF("    Create9 = %p   Create9On12 = %p", (void *)p_Create9, (void *)p_Create9On12);
                 return;
             }
-            LogF("[i] 链目标不可用 (%s), 回退系统 d3d9", path);
+            LogF("[i] 链目标不可用 (%s, 已试根目录%s), 回退系统 d3d9",
+                 chain, hasSlash ? "" : "/backends\\cpu\\/backends\\");
         }
     }
 
@@ -275,8 +290,54 @@ static void TryLoadModule(const char *dllRel, const unsigned char exeMd5[16])
     }
 }
 
-/* ---- 自动发现模块 (独立模式, 不靠任何 ini) ----
+/* ---- SokuEngine.ini [Modules] —— 管理器的开关实际写在这里 ----
+   管理器 (soku_config.exe) 把左列勾选写成
+       modules\SokuEngine\SokuEngine.ini  [Modules]  名=0/1
+   键名 == modules\ 下的子目录名。
+
+   但 LoadEngine=0 时 SokuEngine.dll 根本不被加载, 于是没人读这个段 ——
+   管理器的勾选看着生效 (文件真的被改写), 实际对加载毫无影响。
+   此函数让发现流程直接读它, 使开关名副其实。
+
+   返回 1 = 该子目录被显式禁用; 0 = 启用, 或未被提及 (默认启用)。
+   若 ini 不存在 / 没有 [Modules] 段, 一律返回 0 —— 不能凭空改变既有行为。 */
+static int IsDisabledInEngineIni(const char *dir, const char *subdirName)
+{
+    char ini[MAX_PATH];
+    char buf[16384];
+    DWORD n;
+    char *p;
+    size_t want;
+
+    sprintf_s(ini, MAX_PATH, "%s\\modules\\SokuEngine\\SokuEngine.ini", dir);
+    if (GetFileAttributesA(ini) == INVALID_FILE_ATTRIBUTES) return 0;
+
+    n = GetPrivateProfileSectionA("Modules", buf, sizeof(buf), ini);
+    if (n == 0) return 0;
+
+    want = strlen(subdirName);
+    for (p = buf; *p; p += strlen(p) + 1) {
+        char *eq = strchr(p, '=');
+        const char *v;
+        size_t klen;
+        if (!eq) continue;
+
+        klen = (size_t)(eq - p);
+        while (klen > 0 && (p[klen - 1] == ' ' || p[klen - 1] == '\t')) klen--;
+        if (klen != want) continue;
+        if (_strnicmp(p, subdirName, klen) != 0) continue;
+
+        v = eq + 1;
+        while (*v == ' ' || *v == '\t') v++;
+        return (atoi(v) == 0);
+    }
+    return 0;
+}
+
+/* ---- 自动发现模块 (独立模式) ----
    扫描 <dir>\modules\*\*.dll, 逐个试加载。
+   若 SokuEngine.ini 存在且有 [Modules] 段, 该段是开关的唯一真相 ——
+   子目录名匹配到 =0 就整目录跳过。
    TryLoadModule 内部会自己判断是不是合法模组。 */
 static int DiscoverModules(const char *dir, const unsigned char exeMd5[16])
 {
@@ -284,6 +345,7 @@ static int DiscoverModules(const char *dir, const unsigned char exeMd5[16])
     WIN32_FIND_DATAA fd, fd2;
     HANDLE hf, hf2;
     int count = 0;
+    int skipped = 0;
 
     sprintf_s(pat, MAX_PATH, "%s\\modules\\*", dir);
     hf = FindFirstFileA(pat, &fd);
@@ -292,6 +354,12 @@ static int DiscoverModules(const char *dir, const unsigned char exeMd5[16])
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (fd.cFileName[0] == '.') continue;
+
+        if (IsDisabledInEngineIni(dir, fd.cFileName)) {
+            LogF("  [禁用] %s  (SokuEngine.ini [Modules]=0)", fd.cFileName);
+            skipped++;
+            continue;
+        }
 
         sprintf_s(pat, MAX_PATH, "%s\\modules\\%s\\*.dll", dir, fd.cFileName);
         hf2 = FindFirstFileA(pat, &fd2);
@@ -310,6 +378,8 @@ static int DiscoverModules(const char *dir, const unsigned char exeMd5[16])
     } while (FindNextFileA(hf, &fd));
 
     FindClose(hf);
+    if (skipped > 0)
+        LogF("[=] 其中 %d 个目录被 SokuEngine.ini 标记为禁用", skipped);
     return count;
 }
 
@@ -405,6 +475,7 @@ static void LoadAll(void)
     /* 独立模式: 直接扫 modules/ 目录自动发现, 不依赖任何 ini */
     if (g_discover) {
         LogF("[+] DiscoverModules=1 —— 自动扫描 modules 目录");
+        LogF("    (SokuEngine.ini [Modules] 段若存在, 其 =0 的项会被跳过)");
         int c = DiscoverModules(dir, md5);
         LogF("[=] 扫描到 %d 个候选 dll", c);
         LogF("[=] 完成: 成功 %d / 真失败 %d / 文件缺失 %d / 非模组 %d",

@@ -116,6 +116,16 @@ static void CountCall(const char *name)
     }
 }
 
+/* 真实调用总数 (不过 MAX_CALL_TRACE 上限)。
+   旧代码崩溃报告写的 `已拦截调用数 = 4000` 就是撞了上限的假值，
+   真值要从 g_stubCount[] 求和。 */
+static int CountCallTotal(void)
+{
+    int i, n = 0;
+    for (i = 0; i < g_stubTotal; i++) n += g_stubCount[i];
+    return n;
+}
+
 static void LogF(const char *fmt, ...)
 {
     if (!g_log) return;
@@ -406,7 +416,7 @@ public:
 #include "stubs_texturesurf9.h"
 };
 
-#define MAX_TEXSURF 4096
+#define MAX_TEXSURF 8192
 static ShimTexSurf9 g_texSurf[MAX_TEXSURF];
 static int          g_texSurfUsed = 0;
 
@@ -482,13 +492,13 @@ static void TexFreeSlot(ShimTexture9 *t)
 
    Note: these are forward declarations.  TexHold is called from
    Core_SetTexture while the texture class is defined further below. */
-#define MAX_HELD 2048
+#define MAX_HELD 4096
 static ShimTexture9 *g_held[MAX_HELD];
 static int           g_heldN = 0;
 static void TexHold(ShimTexture9 *t);
 static void TexReleaseHeld(void);
 
-#define MAX_TEX 4096
+#define MAX_TEX 8192
 static ShimTexture9 g_texPool[MAX_TEX];
 static int          g_texUsed = 0;
 
@@ -579,8 +589,9 @@ static void SR_Decode(const unsigned char *p, UINT stride, SR_Vtx *v)
 {
     DWORD fvf = g_fvf;
     int off = 16;
-    v->x = ((const float *)p)[0];
-    v->y = ((const float *)p)[1];
+    /* SSAA: 顶点已在屏幕空间, 直乘倍率 -> 光栅在超采样分辨率上跑 */
+    v->x = ((const float *)p)[0] * (float)SR_ss;
+    v->y = ((const float *)p)[1] * (float)SR_ss;
     v->col = 0xFFFFFFFFu;
     v->u = 0.0f; v->v = 0.0f; v->hasUV = 0;
 
@@ -596,8 +607,13 @@ static void SR_Decode(const unsigned char *p, UINT stride, SR_Vtx *v)
     if ((fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW) return;
     if (fvf & D3DFVF_DIFFUSE)  { if ((UINT)off + 4 <= stride) v->col = *(const DWORD *)(p + off); off += 4; }
     if (fvf & D3DFVF_SPECULAR) { off += 4; }
-    if (fvf & D3DFVF_TEX1) {
-        if ((UINT)off + 8 <= stride) {
+    /* 纹理坐标【组数】由 FVF bits 8..11 编码: TEX1=1组(0x100) TEX2=2组(0x200) ...
+       原来是 `if (fvf & D3DFVF_TEX1)` —— 只测 bit 8, 于是 FVF=0x244 (TEX2)
+       整组坐标被跳过, 顶点 u,v 全留在 0 -> 整片采样到纹素 (0,0).
+       改为按组数判, 只取第 0 组 (光栅器只用 stage 0). */
+    {
+        UINT texcount = (fvf >> 8) & 0xF;
+        if (texcount >= 1 && (UINT)off + 8 <= stride) {
             v->u = *(const float *)(p + off);
             v->v = *(const float *)(p + off + 4);
             v->hasUV = 1;
@@ -849,8 +865,9 @@ HRESULT Core_Clear(DWORD Count, CONST D3DRECT *pRects, DWORD Flags,
         TexReleaseHeld();
     }
 
-    /* CPU 光栅: 清自己的帧缓冲 */
-    SR_Reset(O_ready ? (int)O_w : 640, O_ready ? (int)O_h : 480);
+    /* CPU 光栅: 清自己的帧缓冲 (按 SSAA 倍率放大) */
+    SR_Reset(O_ready ? (int)O_w * SR_ss : 640 * SR_ss,
+             O_ready ? (int)O_h * SR_ss : 480 * SR_ss);
 
     if (Flags & D3DCLEAR_TARGET) {
         SR_Clear(Color);
@@ -983,7 +1000,7 @@ HRESULT Core_Present(CONST RECT *, CONST RECT *, HWND, CONST RGNDATA *)
             g_frameDrawN++;
             g_drawAtPresent = g_ticksDraw;
         }
-        O_Present();
+        O_PresentAA();
         g_frameCount++;
         if (g_frameCount % 200 == 0) DumpFrameBmp("D:\\th123\\sr_dump.bmp");
         if (g_frameCount % 120 == 0) DumpStatsToFile("运行中");
@@ -1409,7 +1426,7 @@ HRESULT HD_Reset(D3DPRESENT_PARAMETERS *pp)
     if (pp->BackBufferWidth && pp->BackBufferHeight) {
         O_w = pp->BackBufferWidth;
         O_h = pp->BackBufferHeight;
-        SR_Reset((int)O_w, (int)O_h);
+        SR_Reset((int)O_w * SR_ss, (int)O_h * SR_ss);
     }
     return D3DERR_DEVICELOST;
 }
@@ -1535,7 +1552,8 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS *ep)
              (void *)ep->ExceptionRecord->ExceptionInformation[0],
              (void *)ep->ExceptionRecord->ExceptionInformation[1]);
     }
-    LogF("*** 已拦截调用数 = %d", g_callCount);
+    LogF("*** 已拦截调用数 = %d (真实计数, 日志只写前 %d 行)",
+         CountCallTotal(), MAX_CALL_TRACE);
     {
         FILE *f = fopen("D:\\th123\\crash_modules.txt", "w");
         int i;
@@ -1621,13 +1639,42 @@ public:
                 strcat_s(ini, MAX_PATH, "soku_shim.ini");
                 GetPrivateProfileStringA("soku_shim", "Gpu", "gf5200", val, sizeof(val), ini);
                 GpuSelect(val);
+
+                /* ---- 抗锯齿 (运行时可选) ----
+                   AAMode       : off | ssaa | fxaa   (默认 off, 兼容弱机)
+                   SuperSample  : ssaa 专用, 1..4  (1=关 2=4x 3=9x 4=16x)
+                   FXAAStrength : fxaa 专用, 0..100 (默认 60) */
+                {
+                    char aa[32] = "";
+                    int  si;
+
+                    GetPrivateProfileStringA("soku_shim", "AAMode", "off", aa, sizeof(aa), ini);
+                    if (_stricmp(aa, "fxaa") == 0)      O_aaMode = O_AA_FXAA;
+                    else if (_stricmp(aa, "ssaa") == 0) O_aaMode = O_AA_SSAA;
+                    else                                O_aaMode = O_AA_OFF;
+
+                    if (O_aaMode == O_AA_SSAA) {
+                        SR_SetSuperSample(GetPrivateProfileIntA("soku_shim", "SuperSample", 2, ini));
+                    } else {
+                        SR_SetSuperSample(1);   /* FXAA / OFF 都要 1:1 帧缓冲 */
+                    }
+
+                    si = GetPrivateProfileIntA("soku_shim", "FXAAStrength", 60, ini);
+                    if (si < 0) si = 0; if (si > 100) si = 100;
+                    O_aaStrength = (float)si * 0.01f;
+
+                    LogF("[aa] 模式 = %s   超采样 x%d   FXAA强度 %.2f",
+                         O_aaMode == O_AA_FXAA ? "FXAA" :
+                         (O_aaMode == O_AA_SSAA ? "SSAA" : "OFF"),
+                         SR_ss, (double)O_aaStrength);
+                }
                 gpuDone = 1;
             }
         }
 
         /* Create the real D3D9 output device. */
         if (O_CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, pPP)) {
-            SR_Reset((int)O_w, (int)O_h);
+            SR_Reset((int)O_w * SR_ss, (int)O_h * SR_ss);
             /* 启用多线程光栅 (核数-1 个工作线程, 主线程也参与分行带)
                实测 6 线程 4.40x (带纹理+混合场景) */
             SR_SetThreads(SR_TotalThreads());

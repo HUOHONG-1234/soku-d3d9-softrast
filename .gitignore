@@ -1,25 +1,49 @@
-# build artifacts — never commit
-*.dll
-*.exe
+# ---- build artifacts ----
 *.obj
 *.lib
 *.exp
 *.pdb
 *.ilk
+*.res
+NUL.*
 
-# debug output / captures
-*.png
-*.bmp
-*.log
-*.txt
-!requirements.txt
+!third_party/**/*.lib
 
-# build dirs
-build/
+# ---- build outputs ----
 out/
+out_avx2/
+out_sse2/
+out_bugtest/
+build/
 dist/
 .vs/
 
-# python
+# NOTE: released binaries live in dist/ (not committed). Build with package.ps1.
+
+# ---- debug / capture output ----
+*.bmp
+*.log
+sr_dump.*
+gui_*.png
+op_*.png
+crop_*.png
+tmp_*.jpg
+_s2_*.jpg
+
+# ---- python ----
 __pycache__/
 *.pyc
+
+# ---- editor / OS ----
+.vscode/
+Thumbs.db
+desktop.ini
+
+# ---- local scratch ----
+*.bak
+*.bak_*
+tmp_*.py
+tmp_*.ps1
+tmp_printer/
+tmp_offering/
+tmp_offering2/

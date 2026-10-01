@@ -1,4 +1,4 @@
-# package.ps1 -- build a release archive.
+# package.ps1 -- build a release archive containing BOTH cpu backends.
 #
 # Only this project's own binaries go into the archive.  Microsoft's
 # DirectX runtime, DXVK and dgVoodoo2 are loaded at run time from the
@@ -8,37 +8,58 @@
 # ASCII-only: PowerShell 5.1 reads .ps1 as GBK.
 
 param(
-    [string]$Version = "0.1.0",
-    [string]$OutDir  = ".\dist"
+    [string]$Version = "0.3.0",
+    [string]$OutDir  = ".\dist",
+    [int]$DefaultSSAA = 2,      # SSAA level written into the packaged ini
+    [string]$DefaultAA = "off"  # off | ssaa | fxaa  (default = safest)
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-Write-Host "=== 1) build ===" -ForegroundColor Cyan
-& "$Root\build.ps1"
-if (-not (Test-Path "$Root\out\cpu_d3d9.dll")) { Write-Host "[FAIL] build did not produce output" -ForegroundColor Red; exit 1 }
+Write-Host "=== 1) build AVX2 (default) ===" -ForegroundColor Cyan
+& "$Root\build.ps1" -OutDir ".\out_avx2" -Arch AVX2
+if (-not (Test-Path "$Root\out_avx2\cpu_d3d9.dll")) { Write-Host "[FAIL] AVX2 build missing" -ForegroundColor Red; exit 1 }
 
 Write-Host ""
-Write-Host "=== 2) regression test ===" -ForegroundColor Cyan
-& "$Root\out\test_rast.exe" | Write-Host
-if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] regression test failed" -ForegroundColor Red; exit 1 }
+Write-Host "=== 2) build SSE2 (fallback for pre-Haswell) ===" -ForegroundColor Cyan
+& "$Root\build.ps1" -OutDir ".\out_sse2" -Arch SSE2
+if (-not (Test-Path "$Root\out_sse2\cpu_d3d9.dll")) { Write-Host "[FAIL] SSE2 build missing" -ForegroundColor Red; exit 1 }
 
 Write-Host ""
-Write-Host "=== 3) stage package ===" -ForegroundColor Cyan
+Write-Host "=== 3) regression test (both) ===" -ForegroundColor Cyan
+& "$Root\out_avx2\test_rast.exe" | Write-Host
+if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] AVX2 regression failed" -ForegroundColor Red; exit 1 }
+& "$Root\out_sse2\test_rast.exe" | Write-Host
+if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL] SSE2 regression failed" -ForegroundColor Red; exit 1 }
+
+Write-Host ""
+Write-Host "=== 4) stage package ===" -ForegroundColor Cyan
 $Pkg = Join-Path $OutDir "th123_softpipe-$Version"
 if (Test-Path $Pkg) { Remove-Item $Pkg -Recurse -Force }
-New-Item -ItemType Directory -Force -Path "$Pkg\backends\dxvk" | Out-Null
+New-Item -ItemType Directory -Force -Path "$Pkg\backends\cpu"       | Out-Null
+New-Item -ItemType Directory -Force -Path "$Pkg\backends\dxvk"      | Out-Null
 New-Item -ItemType Directory -Force -Path "$Pkg\backends\dgvoodoo2" | Out-Null
-New-Item -ItemType Directory -Force -Path "$Pkg\backends\wined3d" | Out-Null
-New-Item -ItemType Directory -Force -Path "$Pkg\backends\native" | Out-Null
+New-Item -ItemType Directory -Force -Path "$Pkg\backends\wined3d"   | Out-Null
+New-Item -ItemType Directory -Force -Path "$Pkg\backends\native"    | Out-Null
+New-Item -ItemType Directory -Force -Path "$Pkg\backends\lang"      | Out-Null
 
-# --- our own binaries only ---
-Copy-Item "$Root\out\d3d9.dll"        "$Pkg\d3d9.dll"        -Force
-Copy-Item "$Root\out\cpu_d3d9.dll"    "$Pkg\cpu_d3d9.dll"    -Force
-Copy-Item "$Root\out\d3dx9_33.dll"    "$Pkg\d3dx9_33.dll"    -Force
-Copy-Item "$Root\out\soku_config.exe" "$Pkg\soku_config.exe" -Force
-Write-Host "  binaries: d3d9.dll cpu_d3d9.dll d3dx9_33.dll soku_config.exe"
+# --- our own binaries ---
+# loader + d3dx proxy live in the GAME ROOT (the game loads them by name).
+Copy-Item "$Root\out_avx2\d3d9.dll"        "$Pkg\d3d9.dll"        -Force
+Copy-Item "$Root\out_avx2\d3dx9_33.dll"    "$Pkg\d3dx9_33.dll"    -Force
+Copy-Item "$Root\out_avx2\soku_config.exe" "$Pkg\soku_config.exe" -Force
+# the two CPU rasterizers sit side by side; the loader resolves ChainDll
+# against root, then backends\cpu\, then backends\.
+Copy-Item "$Root\out_avx2\cpu_d3d9.dll"    "$Pkg\backends\cpu\cpu_avx2.dll" -Force
+Copy-Item "$Root\out_sse2\cpu_d3d9.dll"    "$Pkg\backends\cpu\cpu_sse2.dll" -Force
+Write-Host "  root    : d3d9.dll  d3dx9_33.dll  soku_config.exe"
+Write-Host "  backends: cpu\cpu_avx2.dll  cpu\cpu_sse2.dll  lang\*.ini"
+
+# --- language packs (soku_config reads backends\lang\<code>.ini) ---
+if (Test-Path "$Root\lang") {
+    Copy-Item "$Root\lang\*.ini" "$Pkg\backends\lang\" -Force
+}
 
 # --- config presets ---
 $loaderIni = @"
@@ -48,7 +69,11 @@ ForceLoad=0
 DiscoverModules=1
 LoadEngine=0
 LoadModules=1
-ChainDll=cpu_d3d9.dll
+; Which CPU rasterizer to chain to.  Both live in backends\cpu\.
+;   cpu_avx2.dll = fast, REQUIRES Haswell+ (2013+).  Default.
+;   cpu_sse2.dll = any x64 CPU.  Use this on old machines (Nehalem/Core2 etc.)
+; Switch with soku_config.exe, or edit this line by hand.
+ChainDll=cpu_avx2.dll
 UseOn12=0
 "@
 [System.IO.File]::WriteAllText("$Pkg\soku_loader.ini", $loaderIni, [System.Text.Encoding]::ASCII)
@@ -57,19 +82,34 @@ $shimIni = @"
 [soku_shim]
 ; Path to the real d3d9. Empty = auto-detect:
 ;   backends\dxvk -> backends\dgvoodoo2 -> backends\wined3d -> system
+; The system (native) d3d9 works out of the box with this build.
 RealD3D9=
 ; Advertised GPU: gf5200 | gma900 | weak
 Gpu=gf5200
+
+; ---------------- anti-aliasing (runtime selectable) ----------------
+; AAMode: off | ssaa | fxaa
+;   off  = no AA, fastest
+;   ssaa = supersampling; real coverage AA, costs (SuperSample^2) raster work
+;   fxaa = post-process edge blend; cheap, slightly softens 2D sprites
+AAMode=$DefaultAA
+; SuperSample: SSAA only. 1=off | 2=4x samples | 3=9x | 4=16x
+SuperSample=$DefaultSSAA
+; FXAAStrength: FXAA only, 0..100 (60 is a good default)
+FXAAStrength=60
 "@
 [System.IO.File]::WriteAllText("$Pkg\soku_shim.ini", $shimIni, [System.Text.Encoding]::ASCII)
-Write-Host "  config: soku_loader.ini soku_shim.ini"
+Write-Host "  config  : soku_loader.ini  soku_shim.ini"
 
 # --- docs ---
 Copy-Item "$Root\README.md" "$Pkg\README.md" -Force
 Copy-Item "$Root\LICENSE"   "$Pkg\LICENSE"   -Force
 
-# --- backends README (so users know what to drop in) ---
+# --- backends README ---
 $bk = @"
+backends\cpu\          SHIPPED.  cpu_avx2.dll (Haswell+) and cpu_sse2.dll (any x64).
+                       Pick one via soku_loader.ini ChainDll= or soku_config.exe.
+
 Place third-party backends here.  They are NOT bundled (licence reasons).
 
 backends\dxvk\        dxvk_d3d9.dll, d3d11.dll, dxgi.dll, dxvk.conf
@@ -84,7 +124,7 @@ system d3d9 when no backend is deployed.
 [System.IO.File]::WriteAllText("$Pkg\backends\README.txt", $bk, [System.Text.Encoding]::ASCII)
 
 Write-Host ""
-Write-Host "=== 4) archive ===" -ForegroundColor Cyan
+Write-Host "=== 5) archive ===" -ForegroundColor Cyan
 $zip = Join-Path $OutDir "th123_softpipe-$Version.zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path "$Pkg\*" -DestinationPath $zip -CompressionLevel Optimal
@@ -94,7 +134,7 @@ Write-Host ("  " + $zip + "  " + $kb + " KB") -ForegroundColor Green
 Write-Host ""
 Write-Host "=== package contents ===" -ForegroundColor Cyan
 Get-ChildItem $Pkg -Recurse -File | ForEach-Object {
-    Write-Host ("  {0,-40} {1,8} B" -f $_.FullName.Replace($Pkg + "\", ""), $_.Length)
+    Write-Host ("  {0,-42} {1,8} B" -f $_.FullName.Replace($Pkg + "\", ""), $_.Length)
 }
 
 Write-Host ""

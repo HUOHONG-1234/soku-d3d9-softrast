@@ -19,8 +19,8 @@
  *
  * 顶点语义: D3D9 XYZRHW (屏幕坐标) —— 无需矩阵变换与透视除法。
  */
-#ifndef SOFTRAST_H
-#define SOFTRAST_H
+#ifndef SOFTRAST_SSE2_H
+#define SOFTRAST_SSE2_H
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -32,6 +32,18 @@
 /* ---------------- 帧缓冲 ---------------- */
 static unsigned int *SR_buf = NULL;
 static int           SR_w = 0, SR_h = 0;
+
+/* ---- SSAA 超采样倍率 ----
+   SR_w x SR_h = 输出尺寸 * SR_ss. 顶点解码时坐标同步乘倍率, 输出端盒式缩回.
+   1 = 关 (默认). 注意: shim.cpp 的 SR_Decode / SR_Reset 都会读这个值. */
+static int SR_ss = 1;
+
+static void SR_SetSuperSample(int n)
+{
+    if (n < 1) n = 1;
+    if (n > 4) n = 4;
+    SR_ss = n;
+}
 
 /* SSE2 填充 n 个像素 */
 static void SR_Fill32(unsigned int *dst, unsigned int col, int n)
@@ -131,8 +143,20 @@ static inline unsigned int SR_Div255(unsigned int x)
     return (y + (y >> 8)) >> 8;
 }
 
-/* ---------------- 混合 ---------------- */
-static inline unsigned int SR_BlendPixel(unsigned int src, unsigned int dst)
+/* ---------------- 混合 ----------------
+
+   【关键】混合状态必须按【三角形快照】传入, 不能读全局 SR_st。
+
+   帧级批处理 + 多线程下, 所有绘制被推迟到帧末统一光栅化。
+   到那一刻, 全局 SR_st 早已被后续的 SetRenderState 改掉 ——
+   最常见的是帧尾把 ALPHABLENDENABLE 关了准备画别的。
+   旧实现读全局 -> SR_st.blendOn==0 -> 第一行就 return src ->
+   变成“替换”而不是“混合” -> 贴图 alpha 低的区域保留原图的黑 RGB
+   -> 屏幕上的黑方块。这就是「SSE 不处理透明通道」的根因。
+
+   注意调用方的判断已经是用的 t-> (三角形快照), 所以两者会不一致。 */
+static inline unsigned int SR_BlendPixel(unsigned int src, unsigned int dst,
+                                         int blendOn, int srcB, int dstB)
 {
     unsigned int sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
     unsigned int sa = (src >> 24) & 0xFF;
@@ -140,8 +164,8 @@ static inline unsigned int SR_BlendPixel(unsigned int src, unsigned int dst)
     unsigned int da = (dst >> 24) & 0xFF;
     unsigned int r, g, b, a;
 
-    if (!SR_st.blendOn) return src;
-    if (SR_st.srcBlend == 5 && SR_st.dstBlend == 6) {
+    if (!blendOn) return src;
+    if (srcB == 5 && dstB == 6) {
         if (sa >= 255) return src;
         if (sa == 0)   return dst;
         r = SR_Div255(sr * sa + dr * (255 - sa));
@@ -151,11 +175,11 @@ static inline unsigned int SR_BlendPixel(unsigned int src, unsigned int dst)
         if (a > 255) a = 255;
         return (a << 24) | (r << 16) | (g << 8) | b;
     }
-    if (SR_st.srcBlend == 2 && SR_st.dstBlend == 1) return src;
-    if (SR_st.srcBlend == 1 && SR_st.dstBlend == 1) return dst;
+    if (srcB == 2 && dstB == 1) return src;
+    if (srcB == 1 && dstB == 1) return dst;
     {
         int sf, df;
-        switch (SR_st.srcBlend) {
+        switch (srcB) {
         case 1: sf = 0; break;
         case 2: sf = 255; break;
         case 3: sf = (int)((sr+sg+sb)/3); break;
@@ -164,9 +188,9 @@ static inline unsigned int SR_BlendPixel(unsigned int src, unsigned int dst)
         case 6: sf = 255 - (int)sa; break;
         case 7: sf = (int)da; break;
         case 8: sf = 255 - (int)da; break;
-        default: sf = 0; break;
+        default: sf = (int)sa; break;
         }
-        switch (SR_st.dstBlend) {
+        switch (dstB) {
         case 1: df = 0; break;
         case 2: df = 255; break;
         case 3: df = (int)((dr+dg+db)/3); break;
@@ -509,7 +533,8 @@ static void SR_TriRows(const SR_Tri *t, int yFrom, int yTo, SR_Stats *stats)
                         *dst = (a << 24) | (r << 16) | (g << 8) | b;
                     }
                 } else {
-                    *dst = SR_BlendPixel(col, *dst);
+                    *dst = SR_BlendPixel(col, *dst,
+                                         t->stBlendOn, t->stSrcB, t->stDstB);
                 }
 
                 if (t->useTex) { ui += t->dui; vi += t->dvi; }
@@ -750,4 +775,4 @@ static void SR_ShutdownThreads(void)
     if (SR_hDone) { CloseHandle(SR_hDone); SR_hDone = NULL; }
 }
 
-#endif /* SOFTRAST_H */
+#endif /* SOFTRAST_SSE2_H */
