@@ -1,5 +1,5 @@
 # th123_Softpipe
-
+## 本项目由AI维护，哎呀
 把 **东方非想天则**（Touhou Hisoutensoku, `th123.exe`）的 D3D9 绘制调用截下来，
 **用 CPU 软光栅渲染一整帧**，再把成品位图交给真正的 D3D9 显示。
 
