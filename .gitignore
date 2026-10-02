@@ -47,3 +47,5 @@ tmp_*.ps1
 tmp_printer/
 tmp_offering/
 tmp_offering2/
+
+src/softrast.h
