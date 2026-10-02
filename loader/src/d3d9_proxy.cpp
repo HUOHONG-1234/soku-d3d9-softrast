@@ -14,7 +14,7 @@
  * 版本: 与 soku_config.exe 关于页的「加载器」行保持一致（package.ps1 会核对）。
  */
 
-#define SOKU_LOADER_VERSION "0.1.1hotfix"
+#define SOKU_LOADER_VERSION "0.1.2hotfix"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

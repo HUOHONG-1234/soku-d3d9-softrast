@@ -87,14 +87,14 @@ static HWND g_aboutWnd = NULL;
    Author=作者名
 */
 static wchar_t g_aboutAppName[128] = L"soku_config";     /* 在此处修改应用名（或编辑 soku_loader.ini 的 [About]） */
-static wchar_t g_aboutVersion[64] = L"0.8.1(win32)";      /* 管理器版本号 */
+static wchar_t g_aboutVersion[64] = L"0.8.3hotfix";      /* 管理器版本号 */
 static wchar_t g_aboutAuthor[128] = L"Aya";              /* 在此处填写作者，留空则不显示 */
 /* 管理器 / 本地化 / 加载器三者独立发版，所以版本号分开列。
    （合并成一个会出现「版本: 0.8.1: 0.8.1」这种重复显示。）
    加载器那行必须与 loader\src\d3d9_proxy.cpp 的 SOKU_LOADER_VERSION 一致，
    package.ps1 会核对。） */
 static wchar_t g_aboutLocVer[64]  = L"0.8.1";            /* 本地化（语言包）版本 */
-static wchar_t g_aboutLdrVer[64]  = L"0.1.1hotfix";      /* 加载器 d3d9.dll 版本 */
+static wchar_t g_aboutLdrVer[64]  = L"0.1.2hotfix";      /* 加载器 d3d9.dll 版本 */
 
 /* 从 soku_loader.ini 的 [About] 段读取关于信息，优先于源码默认值 */
 static void LoadAboutInfoFromIni(void)
