@@ -315,6 +315,37 @@ static void DumpStatsToFile(const char *tag)
 static HWND  g_hwnd = NULL;
 static IDirect3DDevice9 *g_devPtr = NULL;
 
+/* 游戏最近一次给我们的真实呈现参数（CreateDevice / Reset）。
+
+   以前 HS_GetPresentParameters / HS_GetDisplayMode / HD_GetDisplayMode
+   硬编码 640x480 + Windowed=TRUE。开局游戏本来就要窗口化，所以看着没事；
+   但玩家在游戏内切全屏后，游戏回读这两个接口拿到"我还是窗口 / 我还是
+   640x480"，状态机错乱 -> 画面卡住、进程还活着、声音照出。
+   现在把真值记下来回读。 */
+static D3DPRESENT_PARAMETERS g_lastPP;
+static int                   g_havePP = 0;
+
+static void PP_Remember(const D3DPRESENT_PARAMETERS *pp)
+{
+    if (!pp) return;
+    g_lastPP = *pp;
+    g_havePP = 1;
+}
+
+/* 按记下的真值填显示模式。全屏报游戏要的分辨率/刷新率，窗口报后台缓冲尺寸。 */
+static void PP_ToDisplayMode(D3DDISPLAYMODE *p)
+{
+    if (g_havePP) {
+        p->Width  = g_lastPP.BackBufferWidth  ? g_lastPP.BackBufferWidth  : 640;
+        p->Height = g_lastPP.BackBufferHeight ? g_lastPP.BackBufferHeight : 480;
+        p->RefreshRate = g_lastPP.Windowed ? 0 : g_lastPP.FullScreen_RefreshRateInHz;
+        p->Format = (g_lastPP.BackBufferFormat == D3DFMT_UNKNOWN)
+                    ? D3DFMT_X8R8G8B8 : g_lastPP.BackBufferFormat;
+        return;
+    }
+    p->Width = 640; p->Height = 480; p->RefreshRate = 60; p->Format = D3DFMT_X8R8G8B8;
+}
+
 /* IDirect3D9 实例指针。
    设备侧的 GetDirect3D 需要返回它 —— D3DX 建纹理前会拿它做格式检查，
    之前这里返回失败，直接导致 D3DX 放弃创建纹理 (实测 CreateTexture 0 次)。
@@ -1303,11 +1334,12 @@ HRESULT HS_GetBackBuffer(UINT, D3DBACKBUFFER_TYPE, IDirect3DSurface9 **pp)
 { if (pp) *pp = &g_backBuffer; return S_OK; }
 HRESULT HS_GetRasterStatus(D3DRASTER_STATUS *p) { if (p) memset(p, 0, sizeof(*p)); return S_OK; }
 HRESULT HS_GetDisplayMode(D3DDISPLAYMODE *p)
-{ if (!p) return D3DERR_INVALIDCALL;
-  p->Width = 640; p->Height = 480; p->RefreshRate = 60; p->Format = D3DFMT_X8R8G8B8; return S_OK; }
+{ if (!p) return D3DERR_INVALIDCALL; PP_ToDisplayMode(p); return S_OK; }
 HRESULT HS_GetDevice(IDirect3DDevice9 **pp) { if (pp) *pp = g_devPtr; return S_OK; }
 HRESULT HS_GetPresentParameters(D3DPRESENT_PARAMETERS *p)
-{ if (!p) return D3DERR_INVALIDCALL; memset(p, 0, sizeof(*p));
+{ if (!p) return D3DERR_INVALIDCALL;
+  if (g_havePP) { *p = g_lastPP; return S_OK; }
+  memset(p, 0, sizeof(*p));
   p->BackBufferWidth = 640; p->BackBufferHeight = 480;
   p->BackBufferFormat = D3DFMT_X8R8G8B8; p->BackBufferCount = 2; p->Windowed = TRUE; return S_OK; }
 
@@ -1395,8 +1427,7 @@ HRESULT HD_GetDirect3D(IDirect3D9 **pp)
 }
 
 HRESULT HD_GetDisplayMode(UINT, D3DDISPLAYMODE *p)
-{ if (!p) return D3DERR_INVALIDCALL;
-  p->Width = 640; p->Height = 480; p->RefreshRate = 60; p->Format = D3DFMT_X8R8G8B8; return S_OK; }
+{ if (!p) return D3DERR_INVALIDCALL; PP_ToDisplayMode(p); return S_OK; }
 HRESULT HD_GetSwapChain(UINT, IDirect3DSwapChain9 **pp)
 { LogStub("GetSwapChain"); if (pp) *pp = &g_swapChain; return S_OK; }
 HRESULT HD_GetBackBuffer(UINT, UINT, D3DBACKBUFFER_TYPE, IDirect3DSurface9 **pp)
@@ -1419,6 +1450,7 @@ HRESULT HD_Reset(D3DPRESENT_PARAMETERS *pp)
          pp ? (pp->Windowed ? 1 : 0) : -1,
          pp ? (unsigned)pp->PresentationInterval : 0);
     if (!pp) return D3DERR_INVALIDCALL;
+    PP_Remember(pp);
 
     if (O_Reset(pp)) return S_OK;
 
@@ -1625,6 +1657,7 @@ public:
                      pPP->FullScreen_RefreshRateInHz, pPP->BackBufferCount);
             }
         }
+        PP_Remember(pPP);
         if (!ppOut) return E_POINTER;
         g_hwnd = hFocusWindow;
 
@@ -1725,11 +1758,54 @@ IDirect3D9 * WINAPI Direct3DCreate9(UINT SDKVersion)
 }
 
 HRESULT WINAPI Direct3DCreate9Ex(UINT, void **ppOut)
-{ LogStub("Direct3DCreate9Ex"); if (ppOut) *ppOut = NULL; return E_NOTIMPL; }
+{
+    /* 真系统 d3d9 有它（游戏不用，但模组可能用）。
+       以前返回 E_NOTIMPL —— 一份声明了却不干活的假导出。
+       现在原样转给真 d3d9，只把模组和游戏分道扬镳的风险交还给调用方。 */
+    LogStub("Direct3DCreate9Ex");
+    O_LoadReal();
+    if (O_mod) {
+        typedef HRESULT (WINAPI *F)(UINT, void **);
+        F f = (F)GetProcAddress(O_mod, "Direct3DCreate9Ex");
+        if (f) return f(D3D_SDK_VERSION, ppOut);
+    }
+    if (ppOut) *ppOut = NULL;
+    return D3DERR_NOTAVAILABLE;
+}
 void *  WINAPI Direct3DCreate9On12(UINT, void *, UINT)
-{ LogStub("Direct3DCreate9On12"); return NULL; }
+{
+    LogStub("Direct3DCreate9On12");
+    O_LoadReal();
+    if (O_mod) {
+        typedef void *(WINAPI *F)(UINT, void *, UINT);
+        F f = (F)GetProcAddress(O_mod, "Direct3DCreate9On12");
+        if (f) return f(D3D_SDK_VERSION, NULL, 0);
+    }
+    return NULL;
+}
 HRESULT WINAPI Direct3DCreate9On12Ex(UINT, void *, UINT, void **pp)
-{ if (pp) *pp = NULL; return E_NOTIMPL; }
+{
+    LogStub("Direct3DCreate9On12Ex");
+    O_LoadReal();
+    if (O_mod) {
+        typedef HRESULT (WINAPI *F)(UINT, void *, UINT, void **);
+        F f = (F)GetProcAddress(O_mod, "Direct3DCreate9On12Ex");
+        if (f) return f(D3D_SDK_VERSION, NULL, 0, pp);
+    }
+    if (pp) *pp = NULL;
+    return D3DERR_NOTAVAILABLE;
+}
+
+/* 真系统 d3d9 导出了它（17 个导出之一），模组加载器也转发了它，
+   但软光栅一直没实现 —— 三个 DLL 里唯独这里断链，
+   转发拿到 NULL 后静默返回 0。名字里带 MaximizedWindowedMode，
+   与全屏议题容易混淆，实际是给老游戏强制最大窗口化的兼容开关。
+   补上只为堵断链，不做任何窗口操作（那会与游戏的显示管理打架）。 */
+int     WINAPI Direct3D9EnableMaximizedWindowedModeShim(int Enable)
+{
+    LogF("[i] Direct3D9EnableMaximizedWindowedModeShim(%d) —— 空实现", Enable);
+    return 0;
+}
 void *  WINAPI Direct3DShaderValidatorCreate9(void) { return NULL; }
 int     WINAPI D3DPERF_BeginEvent(DWORD, const wchar_t *) { return 0; }
 int     WINAPI D3DPERF_EndEvent(void) { return 0; }

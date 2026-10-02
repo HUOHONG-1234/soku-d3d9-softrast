@@ -4,6 +4,7 @@ EXPORTS
     Direct3DCreate9Ex
     Direct3DCreate9On12
     Direct3DCreate9On12Ex
+    Direct3D9EnableMaximizedWindowedModeShim
     Direct3DShaderValidatorCreate9
     D3DPERF_BeginEvent
     D3DPERF_EndEvent
