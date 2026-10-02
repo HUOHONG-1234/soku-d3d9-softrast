@@ -8,7 +8,9 @@
 # ASCII-only: PowerShell 5.1 reads .ps1 as GBK.
 
 param(
-    [string]$Version = "0.3.0",
+    [string]$Version       = "0.8.1",     # manager (soku_config.exe)
+    [string]$LocVersion    = "0.8.1",     # localization (backends\lang\*.ini)
+    [string]$LoaderVersion = "0.1.1hotfix",# loader (d3d9.dll)
     [string]$OutDir  = ".\dist",
     [int]$DefaultSSAA = 2,      # SSAA level written into the packaged ini
     [string]$DefaultAA = "off"  # off | ssaa | fxaa  (default = safest)
@@ -16,6 +18,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# The About page shows the loader version from soku_loader.ini, but the loader
+# itself logs its own copy.  They ship together, so refuse to package a
+# mismatch rather than publish a build that lies about itself.
+$ldrSrc = Get-Content "$Root\loader\src\d3d9_proxy.cpp" -Raw
+if ($ldrSrc -match '#define\s+SOKU_LOADER_VERSION\s+"([^"]+)"') {
+    $inSrc = $Matches[1]
+    if ($inSrc -ne $LoaderVersion) {
+        Write-Host ("[FAIL] LoaderVersion mismatch: package.ps1 says '" + $LoaderVersion + "', d3d9_proxy.cpp says '" + $inSrc + "'") -ForegroundColor Red
+        exit 1
+    }
+    Write-Host ("loader ver  = " + $LoaderVersion + "  (matches source)") -ForegroundColor Cyan
+} else {
+    Write-Host "[FAIL] SOKU_LOADER_VERSION not found in d3d9_proxy.cpp" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "=== 1) build AVX2 (default) ===" -ForegroundColor Cyan
 & "$Root\build.ps1" -OutDir ".\out_avx2" -Arch AVX2
@@ -75,6 +93,14 @@ LoadModules=1
 ; Switch with soku_config.exe, or edit this line by hand.
 ChainDll=cpu_avx2.dll
 UseOn12=0
+
+[About]
+; Shown on the About tab.  The three parts version independently.
+AppName=soku_config
+Version=$Version
+LocVersion=$LocVersion
+LoaderVersion=$LoaderVersion
+Author=Aya
 "@
 [System.IO.File]::WriteAllText("$Pkg\soku_loader.ini", $loaderIni, [System.Text.Encoding]::ASCII)
 

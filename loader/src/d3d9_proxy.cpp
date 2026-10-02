@@ -10,7 +10,11 @@
  * 模组 ABI (从 modules/*.dll 导出表实测, 所有模组一致):
  *     bool CheckVersion(const unsigned char hash[16]);
  *     bool Initialize(HMODULE hMyModule, HMODULE hParentModule);
+ *
+ * 版本: 与 soku_config.exe 关于页的「加载器」行保持一致（package.ps1 会核对）。
  */
+
+#define SOKU_LOADER_VERSION "0.1.1hotfix"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -617,7 +621,7 @@ BOOL WINAPI DllMain(HMODULE hSelf, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hSelf);
         g_log = fopen("soku_loader.log", "w");
-        LogF("[i] soku_loader 注入成功 (d3d9 proxy)");
+        LogF("[i] soku_loader %s 注入成功 (d3d9 proxy)", SOKU_LOADER_VERSION);
     } else if (reason == DLL_PROCESS_DETACH) {
         LogF("[i] 进程退出");
         if (g_log) { fclose(g_log); g_log = NULL; }

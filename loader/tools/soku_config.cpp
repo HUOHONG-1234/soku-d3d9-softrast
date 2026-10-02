@@ -87,8 +87,14 @@ static HWND g_aboutWnd = NULL;
    Author=作者名
 */
 static wchar_t g_aboutAppName[128] = L"soku_config";     /* 在此处修改应用名（或编辑 soku_loader.ini 的 [About]） */
-static wchar_t g_aboutVersion[64] = L"0.8.1(win32)";          /* 在此处修改版本号 */
-static wchar_t g_aboutAuthor[128] = L"Aya";               /* 在此处填写作者，留空则不显示 */
+static wchar_t g_aboutVersion[64] = L"0.8.1(win32)";      /* 管理器版本号 */
+static wchar_t g_aboutAuthor[128] = L"Aya";              /* 在此处填写作者，留空则不显示 */
+/* 管理器 / 本地化 / 加载器三者独立发版，所以版本号分开列。
+   （合并成一个会出现「版本: 0.8.1: 0.8.1」这种重复显示。）
+   加载器那行必须与 loader\src\d3d9_proxy.cpp 的 SOKU_LOADER_VERSION 一致，
+   package.ps1 会核对。） */
+static wchar_t g_aboutLocVer[64]  = L"0.8.1";            /* 本地化（语言包）版本 */
+static wchar_t g_aboutLdrVer[64]  = L"0.1.1hotfix";      /* 加载器 d3d9.dll 版本 */
 
 /* 从 soku_loader.ini 的 [About] 段读取关于信息，优先于源码默认值 */
 static void LoadAboutInfoFromIni(void)
@@ -101,6 +107,11 @@ static void LoadAboutInfoFromIni(void)
         wcsncpy_s(g_aboutVersion, _countof(g_aboutVersion), buf, _TRUNCATE);
     if (GetPrivateProfileStringW(L"About", L"Author", L"", buf, _countof(buf), g_loaderIni) && buf[0])
         wcsncpy_s(g_aboutAuthor, _countof(g_aboutAuthor), buf, _TRUNCATE);
+    /* 本地化 / 加载器版本也允许 ini 覆盖 —— 打包脚本据此写入实际版本 */
+    if (GetPrivateProfileStringW(L"About", L"LocVersion", L"", buf, _countof(buf), g_loaderIni) && buf[0])
+        wcsncpy_s(g_aboutLocVer, _countof(g_aboutLocVer), buf, _TRUNCATE);
+    if (GetPrivateProfileStringW(L"About", L"LoaderVersion", L"", buf, _countof(buf), g_loaderIni) && buf[0])
+        wcsncpy_s(g_aboutLdrVer, _countof(g_aboutLdrVer), buf, _TRUNCATE);
 }
 
 static LRESULT CALLBACK AboutWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -164,12 +175,22 @@ static LRESULT CALLBACK AboutWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         g.DrawString(name.c_str(), -1, &titleFont, nameRect, NULL, &blackBrush);
         y += 28;
 
-        if (g_aboutVersion[0]) {
-            std::wstring verLabel = std::wstring(L("LblVersion"));
-            std::wstring ver = verLabel + std::wstring(L": ") + g_aboutVersion;
-            Gdiplus::RectF verRect((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 20);
-            g.DrawString(ver.c_str(), -1, &subFont, verRect, NULL, &blackBrush);
-            y += 20;
+        /* 版本区：管理器 / 本地化 / 加载器 各一行，空的自动跳过。 */
+        {
+            struct { const wchar_t *label; const wchar_t *val; } rows[3];
+            int nrows = 0;
+            rows[nrows].label = L("LblVersion");      rows[nrows].val = g_aboutVersion;
+            if (rows[nrows].val[0]) nrows++;
+            rows[nrows].label = L("LblLocalization"); rows[nrows].val = g_aboutLocVer;
+            if (rows[nrows].val[0]) nrows++;
+            rows[nrows].label = L("LblLoader");       rows[nrows].val = g_aboutLdrVer;
+            if (rows[nrows].val[0]) nrows++;
+            for (int i = 0; i < nrows; i++) {
+                std::wstring line = std::wstring(rows[i].label) + std::wstring(L": ") + rows[i].val;
+                Gdiplus::RectF r((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 20);
+                g.DrawString(line.c_str(), -1, &subFont, r, NULL, &blackBrush);
+                y += 20;
+            }
         }
         if (g_aboutAuthor[0]) {
             std::wstring authLabel = std::wstring(L("LblAuthor"));
@@ -483,7 +504,7 @@ static int CountSpec(const wchar_t *s)
     return n;
 }
 
-static void LangAddLine(const char *line)
+static void LangAddLine(const char *line, bool utf8)
 {
     const char *eq;
     char key[LK_KEY];
@@ -506,7 +527,16 @@ static void LangAddLine(const char *line)
     {
         const char *v = eq + 1;
         blen = (int)strlen(v);
-        n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, v, blen, wbuf, LK_VAL - 1);
+        if (utf8) {
+            /* 语言文件固定 UTF-8：非法就丢这一行 */
+            n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, v, blen, wbuf, LK_VAL - 1);
+        } else {
+            /* 内置兜底表是源码字符串常量。本工程用 /execution-charset:gbk 编译，
+               所以它们是 GBK 字节。以前这里统一按 UTF-8 strict 解 —— GBK 字节
+               必然返回 0 (err=1113)，导致整张中文兜底表被静默丢弃，
+               语言文件缺失时界面全是空标签。现在按 ANSI 解。 */
+            n = MultiByteToWideChar(CP_ACP, 0, v, blen, wbuf, LK_VAL - 1);
+        }
         if (n <= 0) return;
         wbuf[n] = 0;
     }
@@ -572,7 +602,7 @@ static void LangLoadFile(const wchar_t *path, const char *code, bool reset)
             (unsigned char)line[1] == 0xBB &&
             (unsigned char)line[2] == 0xBF)
             line.erase(0, 3);
-        LangAddLine(line.c_str());
+        LangAddLine(line.c_str(), true);
         start = end;
         while (start < text.size() && (text[start] == '\r' || text[start] == '\n')) start++;
     }
@@ -612,6 +642,11 @@ static void LangLoadBuiltin(void)
         "BackendCPUAVX2","CPU 软光栅 · AVX2 (Haswell+)",
         "BackendCPUSSE2","CPU 软光栅 · SSE2 (任意 x64)",
         "LblAbout","关于",
+        "LblLanguage","语言",
+        "LblVersion","版本",
+        "LblLocalization","本地化",
+        "LblLoader",  "加载器",
+        "LblAuthor",  "作者",
         "StReady",    "就绪",
         "StLoaded",   "已载入 模组 %d 项 / 补丁 %d 项 / 后端: %s / 抗锯齿: %s",
         "StNoModules","读不到 SokuEngine.ini [Modules] 段",
@@ -645,7 +680,7 @@ static void LangLoadBuiltin(void)
     int i;
     g_langN = 0;
     g_langOverlay = 0;      /* 内置中文表就是底表 */
-    for (i = 0; kv[i]; i += 2) LangAddLine((std::string(kv[i]) + "=" + kv[i + 1]).c_str());
+    for (i = 0; kv[i]; i += 2) LangAddLine((std::string(kv[i]) + "=" + kv[i + 1]).c_str(), false);
 }
 
 /* 布局默认值（语言文件可覆盖） */
@@ -893,25 +928,25 @@ static void EnsurePatchLabels(void)
 {
     LangKey *p;
     if ((p = LangFind("Patch16bitsColor")) == NULL || !p->val[0])
-        LangAddLine("Patch16bitsColor=16bits 色深 (复古画面)");
+        LangAddLine("Patch16bitsColor=16bits 色深 (复古画面)", false);
     if ((p = LangFind("PatchDisableWeather")) == NULL || !p->val[0])
-        LangAddLine("PatchDisableWeather=关闭全部天气特效");
+        LangAddLine("PatchDisableWeather=关闭全部天气特效", false);
     if ((p = LangFind("PatchHideHUD")) == NULL || !p->val[0])
-        LangAddLine("PatchHideHUD=隐藏游戏 HUD");
+        LangAddLine("PatchHideHUD=隐藏游戏 HUD", false);
     if ((p = LangFind("PatchMultiInstance")) == NULL || !p->val[0])
-        LangAddLine("PatchMultiInstance=允许多开游戏");
+        LangAddLine("PatchMultiInstance=允许多开游戏", false);
     if ((p = LangFind("PatchRandomMusic")) == NULL || !p->val[0])
-        LangAddLine("PatchRandomMusic=永远随机关卡音乐");
+        LangAddLine("PatchRandomMusic=永远随机关卡音乐", false);
     if ((p = LangFind("PatchDenyWatch")) == NULL || !p->val[0])
-        LangAddLine("PatchDenyWatch=默认禁止观战");
+        LangAddLine("PatchDenyWatch=默认禁止观战", false);
     if ((p = LangFind("PatchDenyBattle")) == NULL || !p->val[0])
-        LangAddLine("PatchDenyBattle=默认观战模式");
+        LangAddLine("PatchDenyBattle=默认观战模式", false);
     if ((p = LangFind("PatchInputFreedom")) == NULL || !p->val[0])
-        LangAddLine("PatchInputFreedom=无焦点也接收手柄输入");
+        LangAddLine("PatchInputFreedom=无焦点也接收手柄输入", false);
     if ((p = LangFind("PatchFilesystemFirst")) == NULL || !p->val[0])
-        LangAddLine("PatchFilesystemFirst=优先从文件系统读资源");
+        LangAddLine("PatchFilesystemFirst=优先从文件系统读资源", false);
     if ((p = LangFind("PatchNativeDPad")) == NULL || !p->val[0])
-        LangAddLine("PatchNativeDPad=用手柄十字键而非摇杆");
+        LangAddLine("PatchNativeDPad=用手柄十字键而非摇杆", false);
 }
 
 struct BFile { const char *src; const char *dst; };
