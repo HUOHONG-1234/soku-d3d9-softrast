@@ -35,6 +35,8 @@
    d3d9.dll 代理，导入表按裸名解析会命中代理而不是系统库。
    所以运行时用 GetSystemDirectory + LoadLibrary 绝对路径加载。 */
 #include <d3d9.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")   /* 关于页的版本查询 */
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -95,6 +97,20 @@ static wchar_t g_aboutAuthor[128] = L"Aya";              /* 在此处填写作�
    package.ps1 会核对。） */
 static wchar_t g_aboutLocVer[64]  = L"0.8.1";            /* 本地化（语言包）版本 */
 static wchar_t g_aboutLdrVer[64]  = L"0.1.2hotfix";      /* 加载器 d3d9.dll 版本 */
+
+/* ---- GitHub 版本查询 ----
+   以前版本号是硬编码的。现在启动时开个线程去 release 页读 tag，
+   读到了就在关于页多显示一行「最新: x.y.z」。
+
+   只在【后台线程】写这三个变量，读完发 WM_APP_VERCHECK 通知主窗口，
+   所以绘制时读它们不会读到半写的字符串。失败就静默 ——
+   离线时关于页跟以前一样，不多一行废话。 */
+#define WM_APP_VERCHECK (WM_APP + 1)
+#define SOKU_VER_JSON_URL L"/repos/HUOHONG-1234/th123_Softpipe/releases/latest"
+
+static wchar_t g_verRemote[64] = L"";   /* 远程 tag，空 = 没查到 */
+static int     g_verIsNew  = 0;          /* 1 = 有新版 */
+static int     g_verTried  = 0;          /* 1 = 查过了（不管成败） */
 
 /* 从 soku_loader.ini 的 [About] 段读取关于信息，优先于源码默认值 */
 static void LoadAboutInfoFromIni(void)
@@ -166,16 +182,19 @@ static LRESULT CALLBACK AboutWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         int y = rc.top + padding;
 
         Gdiplus::FontFamily ffTitle(L"Segoe UI");
-        Gdiplus::Font titleFont(&ffTitle, 16, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-        Gdiplus::Font subFont(&ffTitle, 11, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        /* 关于页字号：原来 16/11 偏小，尤其在高分屏上。
+           现在 26/17，行高也跟着放大。 */
+        Gdiplus::Font titleFont(&ffTitle, 26, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font subFont(&ffTitle, 17, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::SolidBrush blackBrush(Gdiplus::Color(20,20,20));
 
         std::wstring name(g_aboutAppName);
-        Gdiplus::RectF nameRect((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 24);
+        Gdiplus::RectF nameRect((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 34);
         g.DrawString(name.c_str(), -1, &titleFont, nameRect, NULL, &blackBrush);
-        y += 28;
+        y += 40;
 
-        /* 版本区：管理器 / 本地化 / 加载器 各一行，空的自动跳过。 */
+        /* 版本区：管理器 / 本地化 / 加载器 各一行，空的自动跳过。
+           最后一行是 GitHub 上拉回来的最新版本（联网成功才有）。 */
         {
             struct { const wchar_t *label; const wchar_t *val; } rows[3];
             int nrows = 0;
@@ -187,17 +206,36 @@ static LRESULT CALLBACK AboutWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             if (rows[nrows].val[0]) nrows++;
             for (int i = 0; i < nrows; i++) {
                 std::wstring line = std::wstring(rows[i].label) + std::wstring(L": ") + rows[i].val;
-                Gdiplus::RectF r((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 20);
+                Gdiplus::RectF r((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 24);
                 g.DrawString(line.c_str(), -1, &subFont, r, NULL, &blackBrush);
-                y += 20;
+                y += 26;
+            }
+            /* 联网查到的版本。三种状态：查到了 / 已是最新 / 没查成。 */
+            if (g_verRemote[0]) {
+                std::wstring line = std::wstring(L("LblLatest")) + std::wstring(L": ") + g_verRemote;
+                Gdiplus::RectF r((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 24);
+                Gdiplus::SolidBrush mark(g_verIsNew ? Gdiplus::Color(196,32,32)
+                                                   : Gdiplus::Color(32,128,48));
+                g.DrawString(line.c_str(), -1, &subFont, r, NULL, &mark);
+                y += 26;
+                if (!g_verIsNew) {
+                    Gdiplus::RectF r2((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 24);
+                    g.DrawString(L("StUpToDate"), -1, &subFont, r2, NULL, &mark);
+                    y += 26;
+                }
+            } else if (g_verTried) {
+                Gdiplus::RectF r((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 24);
+                Gdiplus::SolidBrush grey(Gdiplus::Color(130,130,130));
+                g.DrawString(L("StVerCheckFail"), -1, &subFont, r, NULL, &grey);
+                y += 26;
             }
         }
         if (g_aboutAuthor[0]) {
             std::wstring authLabel = std::wstring(L("LblAuthor"));
             std::wstring auth = authLabel + std::wstring(L": ") + g_aboutAuthor;
-            Gdiplus::RectF authRect((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 20);
+            Gdiplus::RectF authRect((Gdiplus::REAL)textX, (Gdiplus::REAL)y, (Gdiplus::REAL)textW, 24);
             g.DrawString(auth.c_str(), -1, &subFont, authRect, NULL, &blackBrush);
-            y += 20;
+            y += 26;
         }
         EndPaint(h, &ps);
         return 0;
@@ -1508,9 +1546,113 @@ static void UpdateSysInfo(void)
 /* ============================================================================
  * 窗口过程
  * ==========================================================================*/
-static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+/* ---- GitHub 版本查询（后台线程）----
+   读 releases/latest 的 JSON，从 tag_name 里抠出版本号。
+   只认 ASCII 数字/点 + 一个可选后缀（hotfix 之类），避免把怪 tag 拼进 UI。 */
+static void ExtractTagVersion(const std::string &json, wchar_t *out, int cch)
 {
-    switch (msg) {
+    const char *key = "\"tag_name\"";
+    size_t k = json.find(key);
+    if (k == std::string::npos) return;
+    k = json.find(':', k + strlen(key));
+    if (k == std::string::npos) return;
+    k = json.find('"', k);
+    if (k == std::string::npos) return;
+    size_t e = json.find('"', k + 1);
+    if (e == std::string::npos) return;
+
+    std::string tag = json.substr(k + 1, e - k - 1);
+    while (!tag.empty() && (tag[0] == 'v' || tag[0] == 'V')) tag.erase(0, 1);
+
+    std::string keep;
+    for (size_t i = 0; i < tag.size() && keep.size() < 63; i++) {
+        char c = tag[i];
+        if ((c >= '0' && c <= '9') || c == '.' || c == '-' ||
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+            keep += c;
+        else
+            break;
+    }
+    if (keep.empty()) return;
+    MultiByteToWideChar(CP_ACP, 0, keep.c_str(), -1, out, cch);
+}
+
+/* 只要有一边解析失败就当没查到 —— 宁可不显示，也不显示错的。 */
+static int CompareVer(const wchar_t *a, const wchar_t *b)
+{
+    int na[4] = {0,0,0,0}, nb[4] = {0,0,0,0};
+    int ra = swscanf_s(a, L"%d.%d.%d.%d", &na[0], &na[1], &na[2], &na[3]);
+    int rb = swscanf_s(b, L"%d.%d.%d.%d", &nb[0], &nb[1], &nb[2], &nb[3]);
+    if (ra < 2 || rb < 2) return 0;
+    for (int i = 0; i < 4; i++) {
+        if (na[i] != nb[i]) return na[i] > nb[i] ? 1 : -1;
+    }
+    return 0;
+}
+
+/* 一次查询尝试。成功写入 out 并返回 1。 */
+static int VerCheckAttempt(DWORD accessType, wchar_t *out, int cch)
+{
+    HINTERNET ses = WinHttpOpen(L"th123-softpipe/check", accessType,
+                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!ses) return 0;
+
+    int ok = 0;
+    HINTERNET con = WinHttpConnect(ses, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (con) {
+        HINTERNET req = WinHttpOpenRequest(con, L"GET", SOKU_VER_JSON_URL,
+                                           NULL, WINHTTP_NO_REFERER,
+                                           WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                           WINHTTP_FLAG_SECURE);
+        if (req) {
+            /* GitHub API 不带 User-Agent 会直接 403。 */
+            static const wchar_t *hdr = L"User-Agent: th123-softpipe\r\nAccept: application/vnd.github+json\r\n";
+            if (WinHttpSendRequest(req, hdr, (DWORD)-1L,
+                                   WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+                WinHttpReceiveResponse(req, NULL)) {
+                std::string body;
+                DWORD avail = 0;
+                while (WinHttpQueryDataAvailable(req, &avail) && avail > 0) {
+                    char tmp[1024];
+                    DWORD got = 0;
+                    DWORD want = avail > sizeof(tmp) ? (DWORD)sizeof(tmp) : avail;
+                    if (!WinHttpReadData(req, tmp, want, &got) || !got) break;
+                    body.append(tmp, got);
+                    if (body.size() > 65536) break;
+                }
+                ExtractTagVersion(body, out, cch);
+                ok = out[0] ? 1 : 0;
+            }
+            WinHttpCloseHandle(req);
+        }
+        WinHttpCloseHandle(con);
+    }
+    WinHttpCloseHandle(ses);
+    return ok;
+}
+
+/* 版本查询线程。用完自己退出，句柄由调用方 CloseHandle。
+   先走系统代理（用户多半挂着加速器），不行再直连 ——
+   墙内外都能查到。 */
+static DWORD WINAPI VerCheckThread(LPVOID param)
+{
+    HWND wnd = (HWND)param;
+    wchar_t remote[64] = L"";
+
+    if (!VerCheckAttempt(WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, remote, 64))
+        VerCheckAttempt(WINHTTP_ACCESS_TYPE_NO_PROXY, remote, 64);
+
+    if (remote[0]) {
+        wcsncpy_s(g_verRemote, 64, remote, _TRUNCATE);
+        g_verIsNew = (CompareVer(remote, g_aboutVersion) > 0);
+    }
+    g_verTried = 1;
+    if (wnd) PostMessageW(wnd, WM_APP_VERCHECK, 0, 0);
+    return 0;
+}
+
+static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{    switch (msg) {
     case WM_CREATE: {
         HWND lm = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
@@ -1654,8 +1796,24 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         FillList(lpl, g_patches);
         SetStatus(LF("StLoaded"), (int)g_modules.size(), (int)g_patches.size(),
                   L(kBackends[g_backend].labelKey), AAName());
+
+        /* 后台去 GitHub 查最新版本。不能同步做 —— 无网时会让启动卡几秒。
+           线程句柄用完就关，不 join：它是纯只读查询，主窗销毁后
+           PostMessage 到一个无效句柄只会失败，没有副作用。 */
+        {
+            HANDLE th = CreateThread(NULL, 0, VerCheckThread, (LPVOID)h, 0, NULL);
+            if (th) CloseHandle(th);
+        }
         return 0;
     }
+
+    case WM_APP_VERCHECK:
+        /* 版本查询回来了。关于页是自绘的，重绘一次就会把新行画出来。 */
+        if (g_aboutWnd) {
+            InvalidateRect(g_aboutWnd, NULL, TRUE);
+            UpdateWindow(g_aboutWnd);
+        }
+        return 0;
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {
