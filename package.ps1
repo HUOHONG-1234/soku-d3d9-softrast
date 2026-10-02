@@ -8,7 +8,7 @@
 # ASCII-only: PowerShell 5.1 reads .ps1 as GBK.
 
 param(
-    [string]$Version       = "0.8.3hotfix", # manager (soku_config.exe)
+    [string]$Version       = "0.8.4hotfix", # manager (soku_config.exe)
     [string]$LocVersion    = "0.8.1",     # localization (backends\lang\*.ini)
     [string]$LoaderVersion = "0.1.2hotfix",# loader (d3d9.dll)
     [string]$OutDir  = ".\dist",

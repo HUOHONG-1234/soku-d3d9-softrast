@@ -87,7 +87,7 @@ static HWND g_aboutWnd = NULL;
    Author=作者名
 */
 static wchar_t g_aboutAppName[128] = L"soku_config";     /* 在此处修改应用名（或编辑 soku_loader.ini 的 [About]） */
-static wchar_t g_aboutVersion[64] = L"0.8.3hotfix";      /* 管理器版本号 */
+static wchar_t g_aboutVersion[64] = L"0.8.4hotfix";      /* 管理器版本号 */
 static wchar_t g_aboutAuthor[128] = L"Aya";              /* 在此处填写作者，留空则不显示 */
 /* 管理器 / 本地化 / 加载器三者独立发版，所以版本号分开列。
    （合并成一个会出现「版本: 0.8.1: 0.8.1」这种重复显示。）
