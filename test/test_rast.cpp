@@ -166,7 +166,10 @@ int main(void)
         if (n != 0) fails++;
     }
 
-    printf("\n计数器: triIn=%d 退化=%d 屏外=%d 扫描段=%d 像素=%lld 无效采样=%d 有效采样=%d\n",
+    /* 这七个计数器在 softrast_*.h 里都是 long long，全部必须用 %lld。
+       原来 6 个写成 %d（只有 g_spanPix 对）—— 格式串与实参类型不匹配，
+       CWE-686，在可变参数调用里会读到错误的位宽。 */
+    printf("\n计数器: triIn=%lld 退化=%lld 屏外=%lld 扫描段=%lld 像素=%lld 无效采样=%lld 有效采样=%lld\n",
            g_triIn, g_triDegenerate, g_triOffscreen, g_spans, g_spanPix,
            g_whiteSample, g_validSample);
 
