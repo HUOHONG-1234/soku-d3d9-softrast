@@ -106,7 +106,7 @@ static wchar_t g_aboutLdrVer[64]  = L"0.1.2hotfix";      /* 加载器 d3d9.dll �
    所以绘制时读它们不会读到半写的字符串。失败就静默 ——
    离线时关于页跟以前一样，不多一行废话。 */
 #define WM_APP_VERCHECK (WM_APP + 1)
-#define SOKU_VER_JSON_URL L"/repos/HUOHONG-1234/th123_Softpipe/releases/latest"
+#define SOKU_VER_JSON_URL L"/repos/HUOHONG-1234/soku-d3d9-softrast/releases/latest"
 
 static wchar_t g_verRemote[64] = L"";   /* 远程 tag，空 = 没查到 */
 static int     g_verIsNew  = 0;          /* 1 = 有新版 */
